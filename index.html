@@ -236,21 +236,111 @@ function detectOverhangs(pos,threshDeg,minAreaMM2){
   return{zVals:zVals.sort((a,b)=>a-b),totalFaces:pos.length/9,ohFaces,ohAreaPct:totalArea>0?ohArea/totalArea*100:0};
 }
 
-function selectCutPlanes(zVals,gap,zMin,zMax){
-  // Greedy interval-cover: minimises the number of cuts while guaranteeing every
-  // overhang is within `gap` mm of the cut plane placed below it.
-  // For each uncovered overhang at height h, a cut is placed at h (the rightmost
-  // valid position), automatically covering all overhangs in [h, h+gap].
-  if(!zVals.length)return[];
-  const planes=[];
-  let i=0;
-  while(i<zVals.length){
-    const overhangZ=zVals[i]; // lowest Z of the first uncovered overhang in this group
-    planes.push(overhangZ+0.01); // +0.01 mm places the cut just above the overhang base so the face clips cleanly into the upper part
-    const limit=overhangZ+gap;
-    while(i<zVals.length&&zVals[i]<=limit)i++;
+/* ================================================================
+   MULTI-AXIS CUT ENGINE
+   Scores every candidate cut plane (X, Y, or Z axis) by how much it
+   reduces the total minimum-overhang count when each resulting piece
+   is evaluated in its best axis-aligned print orientation.  Greedy
+   iteration picks the highest-scoring cut until no improvement remains
+   or the maximum number of parts is reached.
+   ================================================================ */
+
+// Minimum overhang face count across all 6 axis-aligned print orientations.
+// Lower means the piece is printable with less support in some orientation.
+function minOverhangsAllOrientations(pos,threshDeg,minAreaMM2){
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const oh=[0,0,0,0,0,0]; // +Z,-Z,+X,-X,+Y,-Y
+  for(let i=0;i<pos.length;i+=9){
+    const ax=pos[i+3]-pos[i],ay=pos[i+4]-pos[i+1],az=pos[i+5]-pos[i+2];
+    const bx=pos[i+6]-pos[i],by=pos[i+7]-pos[i+1],bz=pos[i+8]-pos[i+2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len<1e-12)continue;
+    const area=len*0.5;if(area<minAreaMM2)continue;
+    if(nz/len<-cosT)oh[0]++;if(nz/len>cosT)oh[1]++;
+    if(nx/len<-cosT)oh[2]++;if(nx/len>cosT)oh[3]++;
+    if(ny/len<-cosT)oh[4]++;if(ny/len>cosT)oh[5]++;
   }
-  return planes.filter(z=>z>zMin+0.1&&z<zMax-0.1);
+  return Math.min(...oh);
+}
+
+// Score a cut at (axis, val): returns combined min-overhangs for both pieces.
+// Lower is better — means the two pieces are more printable overall.
+function scoreCut(pos,axis,val,threshDeg,minAreaMM2){
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const ohB=[0,0,0,0,0,0],ohA=[0,0,0,0,0,0];
+  for(let i=0;i<pos.length;i+=9){
+    const cv=(pos[i+axis]+pos[i+3+axis]+pos[i+6+axis])/3;
+    const oh=cv>=val?ohA:ohB;
+    const ax=pos[i+3]-pos[i],ay=pos[i+4]-pos[i+1],az=pos[i+5]-pos[i+2];
+    const bx=pos[i+6]-pos[i],by=pos[i+7]-pos[i+1],bz=pos[i+8]-pos[i+2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len<1e-12)continue;
+    const area=len*0.5;if(area<minAreaMM2)continue;
+    if(nz/len<-cosT)oh[0]++;if(nz/len>cosT)oh[1]++;
+    if(nx/len<-cosT)oh[2]++;if(nx/len>cosT)oh[3]++;
+    if(ny/len<-cosT)oh[4]++;if(ny/len>cosT)oh[5]++;
+  }
+  return Math.min(...ohB)+Math.min(...ohA);
+}
+
+// Collect candidate cut values along `axis` using a greedy interval cover of
+// overhang-aligned faces (faces whose normal has a large component on that axis).
+function getCandidatesForAxis(p,axis,plo,phi,gap,threshDeg,minAreaMM2){
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const vals=[];
+  for(let i=0;i<p.length;i+=9){
+    const ax=p[i+3]-p[i],ay=p[i+4]-p[i+1],az=p[i+5]-p[i+2];
+    const bx=p[i+6]-p[i],by=p[i+7]-p[i+1],bz=p[i+8]-p[i+2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len<1e-12)continue;
+    const area=len*0.5;if(area<minAreaMM2)continue;
+    const n=[nx/len,ny/len,nz/len];
+    if(Math.abs(n[axis])>cosT)vals.push(Math.min(p[i+axis],p[i+3+axis],p[i+6+axis]));
+  }
+  vals.sort((a,b)=>a-b);
+  const planes=[];let i=0;
+  while(i<vals.length){
+    const v=vals[i];planes.push(v+0.01);
+    const limit=v+gap;while(i<vals.length&&vals[i]<=limit)i++;
+  }
+  return planes.filter(v=>v>plo+0.1&&v<phi-0.1);
+}
+
+async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
+  const MAX_PARTS=8;
+  const cuts=[];let parts=[pos];
+  for(let iter=0;iter<MAX_PARTS-1;iter++){
+    onProg(30+iter*8,`EVALUATING CUTS (${iter+1})…`);await tick();
+    let bestImprovement=0,bestCut=null,bestPartIdx=-1;
+    for(let pi=0;pi<parts.length;pi++){
+      const p=parts[pi];
+      const baseMOH=minOverhangsAllOrientations(p,threshDeg,minAreaMM2);
+      if(baseMOH===0)continue;
+      let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
+      for(let i=0;i<p.length;i+=3)for(let k=0;k<3;k++){if(p[i+k]<pLo[k])pLo[k]=p[i+k];if(p[i+k]>pHi[k])pHi[k]=p[i+k];}
+      for(let axis=0;axis<3;axis++){
+        const cands=getCandidatesForAxis(p,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
+        if(!cands.length)continue;
+        const step=Math.max(1,Math.floor(cands.length/20));
+        for(let ci=0;ci<cands.length;ci+=step){
+          const val=cands[ci];
+          const score=scoreCut(p,axis,val,threshDeg,minAreaMM2);
+          const improvement=baseMOH-score;
+          if(improvement>bestImprovement){bestImprovement=improvement;bestCut={axis,val};bestPartIdx=pi;}
+        }
+      }
+    }
+    if(!bestCut)break;
+    const{below,above}=sliceAtPlane(parts[bestPartIdx],bestCut.axis,bestCut.val);
+    const newParts=[...parts];newParts.splice(bestPartIdx,1);
+    if(below.length>=9)newParts.push(below);
+    if(above.length>=9)newParts.push(above);
+    parts=newParts;cuts.push(bestCut);
+  }
+  return{cuts,parts};
 }
 
 /* ================================================================
@@ -329,10 +419,14 @@ async function findBestOrientation(pos, threshDeg, minArea, onProg) {
   return {R: bestR, upVec: bestVec, ohAreaPct: bestScore, tested: cands.length};
 }
 
-function buildCap(cutEdges,z,normalUp){
+// axis: 0=X, 1=Y, 2=Z — builds a flat cap in the plane (axis=val).
+// normalPositive: true → cap normal points in +axis direction.
+function buildCap(cutEdges,axis,val,normalPositive){
   if(!cutEdges.length)return[];
-  const P=4,key=p=>p[0].toFixed(P)+'|'+p[1].toFixed(P);
-  const edges=normalUp?cutEdges:cutEdges.map(([p1,p2])=>[p2,p1]);
+  const P=4;
+  const[d0,d1]=[[1,2],[0,2],[0,1]][axis]; // two non-axis dimensions
+  const key=p=>p[d0].toFixed(P)+'|'+p[d1].toFixed(P);
+  const edges=normalPositive?cutEdges:cutEdges.map(([p1,p2])=>[p2,p1]);
   const adj=new Map();
   for(const[p1,p2]of edges)adj.set(key(p1),{from:p1,to:p2});
   const visited=new Set(),tris=[];
@@ -343,42 +437,47 @@ function buildCap(cutEdges,z,normalUp){
       visited.add(ck);const e=adj.get(ck);loop.push(e.from);ck=key(e.to);
     }
     if(loop.length<3)continue;
-    const cx=loop.reduce((s,p)=>s+p[0],0)/loop.length;
-    const cy=loop.reduce((s,p)=>s+p[1],0)/loop.length;
+    const c0=loop.reduce((s,p)=>s+p[d0],0)/loop.length;
+    const c1=loop.reduce((s,p)=>s+p[d1],0)/loop.length;
     for(let i=0;i<loop.length;i++){
       const a=loop[i],b=loop[(i+1)%loop.length];
-      tris.push(cx,cy,z,a[0],a[1],z,b[0],b[1],z);
+      const ct=[0,0,0];ct[axis]=val;ct[d0]=c0;ct[d1]=c1;
+      const at=[0,0,0];at[axis]=val;at[d0]=a[d0];at[d1]=a[d1];
+      const bt=[0,0,0];bt[axis]=val;bt[d0]=b[d0];bt[d1]=b[d1];
+      tris.push(...ct,...at,...bt);
     }
   }
   return tris;
 }
 
-function sliceAtZ(pos,z){
+// Slice pos at the plane (axis=val).  Returns {below, above} Float32Arrays
+// with proper cap faces sealing each side.
+function sliceAtPlane(pos,axis,val){
   const below=[],above=[],cuts=[];
   for(let i=0;i<pos.length;i+=9){
     const v=[[pos[i],pos[i+1],pos[i+2]],[pos[i+3],pos[i+4],pos[i+5]],[pos[i+6],pos[i+7],pos[i+8]]];
-    const abv=v.map(p=>p[2]>=z);const n=abv.filter(Boolean).length;
+    const abv=v.map(p=>p[axis]>=val);const n=abv.filter(Boolean).length;
     if(n===3){above.push(...v[0],...v[1],...v[2]);continue}
     if(n===0){below.push(...v[0],...v[1],...v[2]);continue}
     if(n===1){
       const li=abv.indexOf(true),pi=[0,1,2].filter(j=>j!==li);
       const A=v[li],B=v[pi[0]],C=v[pi[1]];
-      const PAB=lerp3(A,B,(z-A[2])/(B[2]-A[2]));PAB[2]=z;
-      const PAC=lerp3(A,C,(z-A[2])/(C[2]-A[2]));PAC[2]=z;
+      const PAB=lerp3(A,B,(val-A[axis])/(B[axis]-A[axis]));PAB[axis]=val;
+      const PAC=lerp3(A,C,(val-A[axis])/(C[axis]-A[axis]));PAC[axis]=val;
       above.push(...A,...PAB,...PAC);
       below.push(...B,...C,...PAB,...PAB,...C,...PAC);
       cuts.push([PAB,PAC]);
     }else{
       const li=abv.indexOf(false),pi=[0,1,2].filter(j=>j!==li);
       const C=v[li],A=v[pi[0]],B=v[pi[1]];
-      const PCA=lerp3(C,A,(z-C[2])/(A[2]-C[2]));PCA[2]=z;
-      const PCB=lerp3(C,B,(z-C[2])/(B[2]-C[2]));PCB[2]=z;
+      const PCA=lerp3(C,A,(val-C[axis])/(A[axis]-C[axis]));PCA[axis]=val;
+      const PCB=lerp3(C,B,(val-C[axis])/(B[axis]-C[axis]));PCB[axis]=val;
       below.push(...C,...PCA,...PCB);
       above.push(...A,...B,...PCA,...PCA,...B,...PCB);
       cuts.push([PCB,PCA]);
     }
   }
-  const bC=buildCap(cuts,z,true),aC=buildCap(cuts,z,false);
+  const bC=buildCap(cuts,axis,val,true),aC=buildCap(cuts,axis,val,false);
   return{below:new Float32Array([...below,...bC]),above:new Float32Array([...above,...aC])};
 }
 
@@ -392,30 +491,20 @@ async function processModel(pos,threshold,minArea,clusterGap,onProg){
     if(pos[i+1]<yMin)yMin=pos[i+1];if(pos[i+1]>yMax)yMax=pos[i+1];
     if(pos[i+2]<zMin)zMin=pos[i+2];if(pos[i+2]>zMax)zMax=pos[i+2];
   }
-  const cutPlanes=selectCutPlanes(zVals,clusterGap,zMin,zMax);
+  const bounds={xMin,yMin,zMin,xMax,yMax,zMax};
   const warnings=[];
   if(ohFaces===0)warnings.push('No significant overhangs detected — model can print as-is.');
-  if(ohFaces>0&&cutPlanes.length===0)warnings.push('Overhangs detected but no valid cut planes found.');
-  onProg(30,`${ohFaces} OH FACES · ${cutPlanes.length} CUT(S)`);await tick();
-  let parts=[pos];
-  for(let ci=0;ci<cutPlanes.length;ci++){
-    onProg(35+ci*(55/Math.max(cutPlanes.length,1)),`CUTTING Z=${cutPlanes[ci].toFixed(2)}mm…`);await tick();
-    const next=[];
-    for(const p of parts){
-      if(p.length<9)continue;
-      const{below,above}=sliceAtZ(p,cutPlanes[ci]);
-      if(below.length>=9)next.push(below);
-      if(above.length>=9)next.push(above);
-    }
-    if(next.length)parts=next;
-  }
+  onProg(20,`${ohFaces} OVERHANG FACE(S) · SELECTING CUTS…`);await tick();
+  const{cuts,parts}=await selectOptimalCuts(pos,threshold,minArea,clusterGap,bounds,onProg);
+  if(ohFaces>0&&cuts.length===0)warnings.push('Overhangs detected but no valid cut planes found.');
+  onProg(90,`${cuts.length} CUT(S) · CHECKING PARTS…`);await tick();
   for(let i=0;i<parts.length;i++){
     const{ohFaces:rem}=detectOverhangs(parts[i],threshold,minArea);
     if(rem>0)warnings.push(`Part ${i+1}: ${rem} overhang face(s) remain — consider manual adjustment.`);
   }
   const elapsed=((performance.now()-t0)/1000).toFixed(2);
   onProg(100,`DONE (${elapsed}s)`);
-  return{parts,cutPlanes,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds:{xMin,yMin,zMin,xMax,yMax,zMax}};
+  return{parts,cuts,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds};
 }
 
 const tick=()=>new Promise(r=>setTimeout(r,0));
@@ -462,7 +551,7 @@ window.addEventListener('resize',resize);resize();
 (function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera)})();
 let sceneParts=[],cutObjs=[],savedBounds=null,activeIdx=-1;
 function clearScene(){[...sceneParts,...cutObjs].forEach(m=>scene.remove(m));sceneParts=[];cutObjs=[]}
-function renderParts(parts,cutPlanes,b){
+function renderParts(parts,cuts,b){
   clearScene();savedBounds=b;
   parts.forEach((pos,i)=>{
     const geo=new THREE.BufferGeometry();
@@ -473,12 +562,25 @@ function renderParts(parts,cutPlanes,b){
     mesh.rotation.x=-Math.PI/2;mesh.castShadow=mesh.receiveShadow=true;
     mesh.userData.idx=i;scene.add(mesh);sceneParts.push(mesh);
   });
+  // Coordinate mapping from STL space to THREE.js world: X→X, Z→Y, Y→−Z
   const sw=Math.max(b.xMax-b.xMin,b.yMax-b.yMin)*1.2;
-  cutPlanes.forEach(z=>{
+  cuts.forEach(({axis,val})=>{
     const pg=new THREE.PlaneGeometry(sw,sw);
     const pm=new THREE.MeshBasicMaterial({color:0x0066FF,transparent:true,opacity:0.06,depthWrite:false,side:THREE.DoubleSide});
-    const pl=new THREE.Mesh(pg,pm);pl.position.y=z;scene.add(pl);cutObjs.push(pl);
-    const lg=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-sw/2,z,0),new THREE.Vector3(sw/2,z,0)]);
+    const pl=new THREE.Mesh(pg,pm);
+    let lp1,lp2;
+    if(axis===2){              // Z cut → horizontal plane at THREE y=val
+      pl.rotation.x=-Math.PI/2;pl.position.y=val;
+      lp1=new THREE.Vector3(-sw/2,val,0);lp2=new THREE.Vector3(sw/2,val,0);
+    }else if(axis===0){        // X cut → vertical plane perpendicular to THREE x=val
+      pl.rotation.y=Math.PI/2;pl.position.x=val;
+      lp1=new THREE.Vector3(val,b.zMin,0);lp2=new THREE.Vector3(val,b.zMax,0);
+    }else{                     // Y cut → vertical plane at THREE z=−val
+      pl.position.z=-val;
+      lp1=new THREE.Vector3(-sw/2,0,-val);lp2=new THREE.Vector3(sw/2,0,-val);
+    }
+    scene.add(pl);cutObjs.push(pl);
+    const lg=new THREE.BufferGeometry().setFromPoints([lp1,lp2]);
     const lm=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0x0066FF,opacity:0.35,transparent:true}));
     scene.add(lm);cutObjs.push(lm);
   });
@@ -575,13 +677,13 @@ procBtn.addEventListener('click',async()=>{
     const progScale=($('s-autoOrient').checked)?0.7:0.9;
     const result=await processModel(pos,threshold,minArea,gap,
       (pct,msg)=>setProgress(progOffset+pct*progScale,msg));
-    const{parts,cutPlanes,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds}=result;
+    const{parts,cuts,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds}=result;
 
     $('s-faces').textContent=totalFaces.toLocaleString();
     $('s-oh').textContent=ohFaces.toLocaleString();
     $('s-pct').textContent=ohAreaPct.toFixed(1)+'%';
-    $('s-cuts').textContent=cutPlanes.length;
-    $('cut-tags').innerHTML=cutPlanes.map(z=>`<div class="cut-tag">Z=${z.toFixed(2)}</div>`).join('');
+    $('s-cuts').textContent=cuts.length;
+    $('cut-tags').innerHTML=cuts.map(({axis,val})=>`<div class="cut-tag">${['X','Y','Z'][axis]}=${val.toFixed(2)}</div>`).join('');
     $('warn-list').innerHTML=warnings.map(w=>`<div class="warn-item"><span>&#9888;</span><span>${w}</span></div>`).join('');
 
     const names=parts.map((_,i)=>`part_${String(i+1).padStart(2,'0')}.stl`);
@@ -601,7 +703,7 @@ procBtn.addEventListener('click',async()=>{
       pl.appendChild(card);
     });
     currentParts=parts;currentNames=names;
-    renderParts(parts,cutPlanes,bounds);
+    renderParts(parts,cuts,bounds);
     resultsEl.style.display='block';
     perfTag.textContent=`${totalFaces.toLocaleString()} FACES · ${elapsed}s`;perfTag.style.display='block';
   }catch(err){alert('Error: '+err.message);console.error(err)}
