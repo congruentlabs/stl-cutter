@@ -530,12 +530,12 @@ async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
     let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
     for(let i=0;i<piece.length;i+=3)for(let k=0;k<3;k++){if(piece[i+k]<pLo[k])pLo[k]=piece[i+k];if(piece[i+k]>pHi[k])pHi[k]=piece[i+k]}
     // Strategy 1: Grow the largest printable sub-piece from each end
-    const grow=growPrintableSegment(piece,pLo,pHi,gap,threshDeg,minAreaMM2);
-    if(grow){
+    const growResult=growPrintableSegment(piece,pLo,pHi,gap,threshDeg,minAreaMM2);
+    if(growResult){
       let below,above;
-      if(grow.cut.normal){({below,above}=sliceAtGeneralPlane(piece,grow.cut.normal,grow.cut.d))}
-      else{({below,above}=sliceAtPlane(piece,grow.cut.axis,grow.cut.val))}
-      cuts.push(grow.cut);
+      if(growResult.cut.normal){({below,above}=sliceAtGeneralPlane(piece,growResult.cut.normal,growResult.cut.d))}
+      else{({below,above}=sliceAtPlane(piece,growResult.cut.axis,growResult.cut.val))}
+      cuts.push(growResult.cut);
       // After proper clipping, identify which side is the printable piece
       const mohB=below.length>=9?minOverhangsAllOrientations(below,threshDeg,minAreaMM2):Infinity;
       const mohA=above.length>=9?minOverhangsAllOrientations(above,threshDeg,minAreaMM2):Infinity;
