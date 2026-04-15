@@ -427,15 +427,21 @@ async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
           candidates.push({type:'axis',axis,val,coarseImp:baseMOH-score});
         }
       }
-      // Angled candidates
+      // Angled candidates from overhang face normals
       const angledCands=getCandidatesAngled(p,gap,threshDeg,minAreaMM2);
       for(const{normal,d}of angledCands){
         const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
         candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
       }
+      // Shape-contour candidates (bends and cross-section narrowings)
+      const contourCands=getShapeContourCandidates(p,gap);
+      for(const{normal,d}of contourCands){
+        const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
+        candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
+      }
       // --- Phase 2: detailed shape-aware evaluation of top candidates ---
       candidates.sort((a,b)=>b.coarseImp-a.coarseImp);
-      const topN=Math.min(candidates.length,25);
+      const topN=Math.min(candidates.length,30);
       for(let ci=0;ci<topN;ci++){
         const cand=candidates[ci];
         let below,above,crossing;
@@ -682,9 +688,17 @@ function sliceAtGeneralPlane(pos,normal,d){
 }
 
 /* ================================================================
-   ANGLED CUT CANDIDATE GENERATION & SCORING
-   Clusters overhang face normals that aren't axis-aligned, then
-   generates candidate cut planes along those directions.
+   SHAPE-ADAPTIVE ANGLED CUT CANDIDATE GENERATION & SCORING
+   Three strategies for finding cut planes that follow the model's geometry:
+   1. Overhang normal clustering: clusters overhang face normals from ALL
+      directions (not just downward), generates candidates along those
+      angles plus bisector normals between top clusters.
+   2. Cross-section centroid tracking: sweeps along each axis to detect
+      where the shape bends, using centroid-shift direction as the
+      cut plane normal.
+   3. Cross-section narrowing: samples non-axis directions across the
+      hemisphere and finds local minima in the face-count profile,
+      indicating natural waist/joint locations for angled cuts.
    ================================================================ */
 
 function canonicalizeNormal(nx,ny,nz){
@@ -697,6 +711,7 @@ function canonicalizeNormal(nx,ny,nz){
 function getCandidatesAngled(p,gap,threshDeg,minAreaMM2){
   const cosT=Math.cos((90-threshDeg)*Math.PI/180);
   const faces=[];
+  // Collect overhang faces in ALL directions (not just downward-facing)
   for(let i=0;i<p.length;i+=9){
     const ax=p[i+3]-p[i],ay=p[i+4]-p[i+1],az=p[i+5]-p[i+2];
     const bx=p[i+6]-p[i],by=p[i+7]-p[i+1],bz=p[i+8]-p[i+2];
@@ -705,15 +720,18 @@ function getCandidatesAngled(p,gap,threshDeg,minAreaMM2){
     if(len<1e-12)continue;
     const area=len*0.5;if(area<minAreaMM2)continue;
     nx/=len;ny/=len;nz/=len;
-    if(nz<-cosT){
+    // Face is an overhang in at least one print orientation
+    const isOH=nz<-cosT||nz>cosT||nx<-cosT||nx>cosT||ny<-cosT||ny>cosT;
+    if(isOH){
       const cx=(p[i]+p[i+3]+p[i+6])/3,cy=(p[i+1]+p[i+4]+p[i+7])/3,cz=(p[i+2]+p[i+5]+p[i+8])/3;
       faces.push({nx,ny,nz,cx,cy,cz});
     }
   }
   if(!faces.length)return[];
-  const clusters=[],ATOL=0.3;
+  const clusters=[],ATOL=0.25;
   for(const f of faces){
-    if(Math.abs(f.nx)>0.95||Math.abs(f.ny)>0.95||Math.abs(f.nz)>0.95)continue;
+    // Only skip very-axis-aligned normals (already covered by axis candidates)
+    if(Math.abs(f.nx)>0.98||Math.abs(f.ny)>0.98||Math.abs(f.nz)>0.98)continue;
     let found=false;
     for(const c of clusters){
       const dot=c.nx*f.nx+c.ny*f.ny+c.nz*f.nz;
@@ -730,8 +748,8 @@ function getCandidatesAngled(p,gap,threshDeg,minAreaMM2){
   }
   const cands=[];
   clusters.sort((a,b)=>b.count-a.count);
-  for(let ci=0;ci<Math.min(clusters.length,6);ci++){
-    const c=clusters[ci];if(c.count<3)continue;
+  for(let ci=0;ci<Math.min(clusters.length,10);ci++){
+    const c=clusters[ci];if(c.count<2)continue;
     const normal=[c.nx,c.ny,c.nz];
     const dVals=c.ds.slice().sort((a,b)=>a-b);
     let dlo=Infinity,dhi=-Infinity;
@@ -739,11 +757,139 @@ function getCandidatesAngled(p,gap,threshDeg,minAreaMM2){
       const dv=normal[0]*p[i]+normal[1]*p[i+1]+normal[2]*p[i+2];
       if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
     }
+    // Candidates from face centroids
     let j=0;
     while(j<dVals.length){
       const dv=dVals[j];
       if(dv>dlo+0.1&&dv<dhi-0.1)cands.push({normal,d:dv+0.01});
       const limit=dv+gap;while(j<dVals.length&&dVals[j]<=limit)j++;
+    }
+    // Evenly-spaced candidates along this normal direction
+    const range=dhi-dlo;
+    if(range>gap*2){
+      const nSteps=Math.max(5,Math.min(15,Math.ceil(range/(gap*0.5))));
+      const seen=new Set(dVals.map(dv=>Math.round(dv*50)));
+      for(let si=1;si<nSteps;si++){
+        const dv=dlo+(range*si/nSteps);
+        const dk=Math.round(dv*50);
+        if(!seen.has(dk)&&dv>dlo+0.1&&dv<dhi-0.1){seen.add(dk);cands.push({normal,d:dv})}
+      }
+    }
+  }
+  // Bisector normals between top cluster pairs for intermediate angles
+  const topN=Math.min(clusters.filter(c=>c.count>=2).length,5);
+  for(let i=0;i<topN;i++){
+    for(let j=i+1;j<topN;j++){
+      const ci=clusters[i],cj=clusters[j];
+      let bx=ci.nx+cj.nx,by=ci.ny+cj.ny,bz=ci.nz+cj.nz;
+      const bl=Math.sqrt(bx*bx+by*by+bz*bz);
+      if(bl<1e-6)continue;
+      bx/=bl;by/=bl;bz/=bl;
+      if(Math.abs(bx)>0.98||Math.abs(by)>0.98||Math.abs(bz)>0.98)continue;
+      const[bnx,bny,bnz]=canonicalizeNormal(bx,by,bz);
+      let dlo=Infinity,dhi=-Infinity;
+      for(let k=0;k<p.length;k+=3){
+        const dv=bnx*p[k]+bny*p[k+1]+bnz*p[k+2];
+        if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
+      }
+      const range=dhi-dlo;
+      if(range>gap*2){
+        const nSteps=Math.max(3,Math.min(8,Math.ceil(range/gap)));
+        for(let si=1;si<nSteps;si++){
+          const dv=dlo+(range*si/nSteps);
+          if(dv>dlo+0.1&&dv<dhi-0.1)cands.push({normal:[bnx,bny,bnz],d:dv});
+        }
+      }
+    }
+  }
+  return cands;
+}
+
+// Shape-contour analysis: detects geometric bends and cross-section
+// narrowings at non-axis angles to generate shape-adaptive cut candidates.
+function getShapeContourCandidates(p,gap){
+  let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
+  for(let i=0;i<p.length;i+=3){
+    for(let k=0;k<3;k++){if(p[i+k]<pLo[k])pLo[k]=p[i+k];if(p[i+k]>pHi[k])pHi[k]=p[i+k]}
+  }
+  const cands=[];
+  // Phase A: Centroid-shift tracking — sweep along each axis and detect
+  // where the cross-section centroid shifts laterally, indicating a bend.
+  const other=[[1,2],[0,2],[0,1]];
+  for(let axis=0;axis<3;axis++){
+    const range=pHi[axis]-pLo[axis];
+    if(range<1)continue;
+    const nSlabs=Math.max(8,Math.min(25,Math.ceil(range/gap)));
+    const slabW=range/nSlabs;
+    const slabs=[];
+    for(let si=0;si<nSlabs;si++){
+      const lo=pLo[axis]+si*slabW,hi=lo+slabW;
+      let sx=0,sy=0,sz=0,cnt=0;
+      for(let i=0;i<p.length;i+=3){
+        if(p[i+axis]>=lo&&p[i+axis]<hi){sx+=p[i];sy+=p[i+1];sz+=p[i+2];cnt++}
+      }
+      if(cnt>0)slabs.push({pos:lo+slabW*0.5,c:[sx/cnt,sy/cnt,sz/cnt],cnt});
+    }
+    if(slabs.length<3)continue;
+    for(let i=1;i<slabs.length;i++){
+      const prev=slabs[i-1],curr=slabs[i];
+      const dx=curr.c[0]-prev.c[0],dy=curr.c[1]-prev.c[1],dz=curr.c[2]-prev.c[2];
+      const shift=Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if(shift>slabW*0.3){
+        if(shift<1e-6)continue;
+        let nx=dx/shift,ny=dy/shift,nz=dz/shift;
+        if(Math.abs(nx)>0.98||Math.abs(ny)>0.98||Math.abs(nz)>0.98)continue;
+        const[cnx,cny,cnz]=canonicalizeNormal(nx,ny,nz);
+        const mid=[(prev.c[0]+curr.c[0])/2,(prev.c[1]+curr.c[1])/2,(prev.c[2]+curr.c[2])/2];
+        const d=cnx*mid[0]+cny*mid[1]+cnz*mid[2];
+        cands.push({normal:[cnx,cny,cnz],d});
+      }
+    }
+  }
+  // Phase B: Cross-section narrowing along sampled non-axis directions.
+  // Test a set of angles in 3D and find where the perpendicular cross-section
+  // is thinnest, indicating a natural waist/joint for cutting.
+  const testNormals=[];
+  const step=20;
+  for(let theta=step;theta<90;theta+=step){
+    const tr=theta*Math.PI/180;
+    const nPhi=Math.max(4,Math.round(360*Math.sin(tr)/step));
+    for(let pi=0;pi<nPhi;pi++){
+      const pr=pi*2*Math.PI/nPhi;
+      const nx=Math.sin(tr)*Math.cos(pr),ny=Math.sin(tr)*Math.sin(pr),nz=Math.cos(tr);
+      if(Math.abs(nx)>0.98||Math.abs(ny)>0.98||Math.abs(nz)>0.98)continue;
+      testNormals.push(canonicalizeNormal(nx,ny,nz));
+    }
+  }
+  // Deduplicate test normals
+  const nSeen=new Set();
+  const uniqueNormals=[];
+  for(const[nx,ny,nz]of testNormals){
+    const k=`${Math.round(nx*20)},${Math.round(ny*20)},${Math.round(nz*20)}`;
+    if(!nSeen.has(k)){nSeen.add(k);uniqueNormals.push([nx,ny,nz])}
+  }
+  for(const[nx,ny,nz]of uniqueNormals){
+    let dlo=Infinity,dhi=-Infinity;
+    for(let i=0;i<p.length;i+=3){
+      const dv=nx*p[i]+ny*p[i+1]+nz*p[i+2];
+      if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
+    }
+    const range=dhi-dlo;
+    if(range<1)continue;
+    const nSlabs=Math.max(8,Math.min(20,Math.ceil(range/gap)));
+    const slabW=range/nSlabs;
+    const counts=new Array(nSlabs).fill(0);
+    for(let i=0;i<p.length;i+=9){
+      const cv=nx*(p[i]+p[i+3]+p[i+6])/3+ny*(p[i+1]+p[i+4]+p[i+7])/3+nz*(p[i+2]+p[i+5]+p[i+8])/3;
+      const si=Math.min(nSlabs-1,Math.max(0,Math.floor((cv-dlo)/slabW)));
+      counts[si]++;
+    }
+    // Find local minima (narrowings)
+    for(let si=1;si<nSlabs-1;si++){
+      if(counts[si]<counts[si-1]&&counts[si]<counts[si+1]){
+        const dv=dlo+(si+0.5)*slabW;
+        if(dv>dlo+0.1&&dv<dhi-0.1)cands.push({normal:[nx,ny,nz],d:dv});
+      }
     }
   }
   return cands;
