@@ -448,7 +448,21 @@ function growPrintableSegment(piece,pLo,pHi,gap,threshDeg,minAreaMM2){
     const k=normal.map(v=>Math.round(v*50)).join(',');
     if(!nSet.has(k)){nSet.add(k);uNormals.push(normal)}
   }
-  for(const normal of uNormals.slice(0,15)){
+  // Systematic hemisphere normals for full 360° angular coverage
+  const growAngStep=30;
+  for(let theta=growAngStep;theta<=90;theta+=growAngStep){
+    const tr=theta*Math.PI/180;
+    const nPhi=Math.max(4,Math.round(360*Math.sin(tr)/growAngStep));
+    for(let pi=0;pi<nPhi;pi++){
+      const pr=pi*2*Math.PI/nPhi;
+      const snx=Math.sin(tr)*Math.cos(pr),sny=Math.sin(tr)*Math.sin(pr),snz=Math.cos(tr);
+      if(Math.abs(snx)>0.98||Math.abs(sny)>0.98||Math.abs(snz)>0.98)continue;
+      const[cnx,cny,cnz]=canonicalizeNormal(snx,sny,snz);
+      const k=[cnx,cny,cnz].map(v=>Math.round(v*50)).join(',');
+      if(!nSet.has(k)){nSet.add(k);uNormals.push([cnx,cny,cnz])}
+    }
+  }
+  for(const normal of uNormals.slice(0,30)){
     let dlo=Infinity,dhi=-Infinity;
     for(let i=0;i<piece.length;i+=3){
       const dv=normal[0]*piece[i]+normal[1]*piece[i+1]+normal[2]*piece[i+2];
@@ -495,9 +509,38 @@ function findBestFallbackCut(piece,pLo,pHi,gap,threshDeg,minAreaMM2){
     const score=scoreCutGeneral(piece,normal,d,threshDeg,minAreaMM2);
     candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
   }
+  // Systematic hemisphere sweep for full 360° angular coverage
+  {
+    const sysStep=20;
+    for(let theta=sysStep;theta<=90;theta+=sysStep){
+      const tr=theta*Math.PI/180;
+      const nPhi=Math.max(4,Math.round(360*Math.sin(tr)/sysStep));
+      for(let pi=0;pi<nPhi;pi++){
+        const pr=pi*2*Math.PI/nPhi;
+        const snx=Math.sin(tr)*Math.cos(pr),sny=Math.sin(tr)*Math.sin(pr),snz=Math.cos(tr);
+        if(Math.abs(snx)>0.98||Math.abs(sny)>0.98||Math.abs(snz)>0.98)continue;
+        const[cnx,cny,cnz]=canonicalizeNormal(snx,sny,snz);
+        const normal=[cnx,cny,cnz];
+        let dlo=Infinity,dhi=-Infinity;
+        for(let i=0;i<piece.length;i+=3){
+          const dv=normal[0]*piece[i]+normal[1]*piece[i+1]+normal[2]*piece[i+2];
+          if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
+        }
+        const range=dhi-dlo;if(range<0.2)continue;
+        const nSteps=Math.max(5,Math.min(15,Math.ceil(range/(gap*0.5))));
+        for(let si=1;si<nSteps;si++){
+          const d=dlo+(range*si/nSteps);
+          if(d>dlo+0.1&&d<dhi-0.1){
+            const score=scoreCutGeneral(piece,normal,d,threshDeg,minAreaMM2);
+            candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
+          }
+        }
+      }
+    }
+  }
   candidates.sort((a,b)=>b.coarseImp-a.coarseImp);
   let bestEval=null,bestCut=null;
-  const topN=Math.min(candidates.length,30);
+  const topN=Math.min(candidates.length,50);
   for(let ci=0;ci<topN;ci++){
     const cand=candidates[ci];let below,above,crossing;
     if(cand.type==='general'){
@@ -937,8 +980,8 @@ function getShapeContourCandidates(p,gap){
   // Test a set of angles in 3D and find where the perpendicular cross-section
   // is thinnest, indicating a natural waist/joint for cutting.
   const testNormals=[];
-  const step=20;
-  for(let theta=step;theta<90;theta+=step){
+  const step=15;
+  for(let theta=step;theta<=90;theta+=step){
     const tr=theta*Math.PI/180;
     const nPhi=Math.max(4,Math.round(360*Math.sin(tr)/step));
     for(let pi=0;pi<nPhi;pi++){
