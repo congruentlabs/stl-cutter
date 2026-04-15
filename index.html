@@ -70,6 +70,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;heigh
 .sv-g{color:var(--accent)}.sv-w{color:var(--warn)}.sv-b{color:var(--blue)}
 .cuts-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
 .cut-tag{font-size:9px;font-family:var(--mono);padding:3px 7px;background:rgba(0,119,255,.1);border:1px solid rgba(0,119,255,.25);border-radius:3px;color:#5599FF}
+.cut-tag-angled{background:rgba(255,102,0,.1);border-color:rgba(255,102,0,.25);color:#FF8844}
 .warn-list{margin-top:8px}
 .warn-item{font-size:10px;color:var(--warn);background:rgba(255,176,32,.06);border:1px solid rgba(255,176,32,.18);border-radius:var(--r);padding:7px 9px;margin-bottom:4px;line-height:1.4;display:flex;gap:6px}
 #part-list{display:flex;flex-direction:column;gap:5px}
@@ -321,6 +322,7 @@ async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
       if(baseMOH===0)continue;
       let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
       for(let i=0;i<p.length;i+=3)for(let k=0;k<3;k++){if(p[i+k]<pLo[k])pLo[k]=p[i+k];if(p[i+k]>pHi[k])pHi[k]=p[i+k];}
+      // Axis-aligned candidates
       for(let axis=0;axis<3;axis++){
         const cands=getCandidatesForAxis(p,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
         if(!cands.length)continue;
@@ -332,9 +334,23 @@ async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
           if(improvement>bestImprovement){bestImprovement=improvement;bestCut={axis,val};bestPartIdx=pi;}
         }
       }
+      // Angled (rotated) candidates — cut planes oriented along overhang normals
+      const angledCands=getCandidatesAngled(p,gap,threshDeg,minAreaMM2);
+      const angledStep=Math.max(1,Math.floor(angledCands.length/20));
+      for(let ci=0;ci<angledCands.length;ci+=angledStep){
+        const{normal,d}=angledCands[ci];
+        const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
+        const improvement=baseMOH-score;
+        if(improvement>bestImprovement){bestImprovement=improvement;bestCut={normal,d};bestPartIdx=pi;}
+      }
     }
     if(!bestCut)break;
-    const{below,above}=sliceAtPlane(parts[bestPartIdx],bestCut.axis,bestCut.val);
+    let below,above;
+    if(bestCut.normal){
+      ({below,above}=sliceAtGeneralPlane(parts[bestPartIdx],bestCut.normal,bestCut.d));
+    }else{
+      ({below,above}=sliceAtPlane(parts[bestPartIdx],bestCut.axis,bestCut.val));
+    }
     const newParts=[...parts];newParts.splice(bestPartIdx,1);
     if(below.length>=9)newParts.push(below);
     if(above.length>=9)newParts.push(above);
@@ -481,6 +497,165 @@ function sliceAtPlane(pos,axis,val){
   return{below:new Float32Array([...below,...bC]),above:new Float32Array([...above,...aC])};
 }
 
+/* ================================================================
+   GENERAL (ANGLED) PLANE SLICING
+   Slices at an arbitrary plane defined by normal·p = d
+   ================================================================ */
+
+function buildCapGeneral(cutEdges,normal,d,normalPositive){
+  if(!cutEdges.length)return[];
+  const[nx,ny,nz]=normal;
+  let tx,ty,tz;
+  if(Math.abs(nx)<0.9){tx=1;ty=0;tz=0}else{tx=0;ty=1;tz=0}
+  let ux=ty*nz-tz*ny,uy=tz*nx-tx*nz,uz=tx*ny-ty*nx;
+  const uLen=Math.sqrt(ux*ux+uy*uy+uz*uz);
+  ux/=uLen;uy/=uLen;uz/=uLen;
+  const vx=ny*uz-nz*uy,vy=nz*ux-nx*uz,vz=nx*uy-ny*ux;
+  const P=4;
+  const proj=p=>[(ux*p[0]+uy*p[1]+uz*p[2]).toFixed(P),(vx*p[0]+vy*p[1]+vz*p[2]).toFixed(P)];
+  const key=p=>{const[a,b]=proj(p);return a+'|'+b};
+  const edges=normalPositive?cutEdges:cutEdges.map(([p1,p2])=>[p2,p1]);
+  const adj=new Map();
+  for(const[p1,p2]of edges)adj.set(key(p1),{from:p1,to:p2});
+  const visited=new Set(),tris=[];
+  for(const[sk]of adj){
+    if(visited.has(sk))continue;
+    const loop=[];let ck=sk,safety=adj.size+2;
+    while(adj.has(ck)&&!visited.has(ck)&&safety-->0){visited.add(ck);const e=adj.get(ck);loop.push(e.from);ck=key(e.to)}
+    if(loop.length<3)continue;
+    const ct=[0,0,0];
+    for(const p of loop){ct[0]+=p[0];ct[1]+=p[1];ct[2]+=p[2]}
+    ct[0]/=loop.length;ct[1]/=loop.length;ct[2]/=loop.length;
+    const cdot=nx*ct[0]+ny*ct[1]+nz*ct[2],diff=d-cdot;
+    ct[0]+=diff*nx;ct[1]+=diff*ny;ct[2]+=diff*nz;
+    for(let i=0;i<loop.length;i++){
+      const a=loop[i],b=loop[(i+1)%loop.length];
+      tris.push(...ct,...a,...b);
+    }
+  }
+  return tris;
+}
+
+function sliceAtGeneralPlane(pos,normal,d){
+  const[nx,ny,nz]=normal;
+  const below=[],above=[],cuts=[];
+  for(let i=0;i<pos.length;i+=9){
+    const v=[[pos[i],pos[i+1],pos[i+2]],[pos[i+3],pos[i+4],pos[i+5]],[pos[i+6],pos[i+7],pos[i+8]]];
+    const dots=[nx*v[0][0]+ny*v[0][1]+nz*v[0][2],nx*v[1][0]+ny*v[1][1]+nz*v[1][2],nx*v[2][0]+ny*v[2][1]+nz*v[2][2]];
+    const abv=[dots[0]>=d,dots[1]>=d,dots[2]>=d];
+    const n=(abv[0]?1:0)+(abv[1]?1:0)+(abv[2]?1:0);
+    if(n===3){above.push(...v[0],...v[1],...v[2]);continue}
+    if(n===0){below.push(...v[0],...v[1],...v[2]);continue}
+    if(n===1){
+      const li=abv[0]?0:abv[1]?1:2,pi=[0,1,2].filter(j=>j!==li);
+      const A=v[li],B=v[pi[0]],C=v[pi[1]];
+      const PAB=lerp3(A,B,(d-dots[li])/(dots[pi[0]]-dots[li]));
+      const PAC=lerp3(A,C,(d-dots[li])/(dots[pi[1]]-dots[li]));
+      above.push(...A,...PAB,...PAC);
+      below.push(...B,...C,...PAB,...PAB,...C,...PAC);
+      cuts.push([PAB,PAC]);
+    }else{
+      const li=!abv[0]?0:!abv[1]?1:2,pi=[0,1,2].filter(j=>j!==li);
+      const C=v[li],A=v[pi[0]],B=v[pi[1]];
+      const PCA=lerp3(C,A,(d-dots[li])/(dots[pi[0]]-dots[li]));
+      const PCB=lerp3(C,B,(d-dots[li])/(dots[pi[1]]-dots[li]));
+      below.push(...C,...PCA,...PCB);
+      above.push(...A,...B,...PCA,...PCA,...B,...PCB);
+      cuts.push([PCB,PCA]);
+    }
+  }
+  const bC=buildCapGeneral(cuts,normal,d,true),aC=buildCapGeneral(cuts,normal,d,false);
+  return{below:new Float32Array([...below,...bC]),above:new Float32Array([...above,...aC])};
+}
+
+/* ================================================================
+   ANGLED CUT CANDIDATE GENERATION & SCORING
+   Clusters overhang face normals that aren't axis-aligned, then
+   generates candidate cut planes along those directions.
+   ================================================================ */
+
+function canonicalizeNormal(nx,ny,nz){
+  // Ensure consistent direction: prefer positive Z, then positive Y, then positive X
+  if(nz<0||(Math.abs(nz)<1e-6&&(ny<0||(Math.abs(ny)<1e-6&&nx<0)))){nx=-nx;ny=-ny;nz=-nz}
+  const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+  return[nx/len,ny/len,nz/len];
+}
+
+function getCandidatesAngled(p,gap,threshDeg,minAreaMM2){
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const faces=[];
+  for(let i=0;i<p.length;i+=9){
+    const ax=p[i+3]-p[i],ay=p[i+4]-p[i+1],az=p[i+5]-p[i+2];
+    const bx=p[i+6]-p[i],by=p[i+7]-p[i+1],bz=p[i+8]-p[i+2];
+    let nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len<1e-12)continue;
+    const area=len*0.5;if(area<minAreaMM2)continue;
+    nx/=len;ny/=len;nz/=len;
+    if(nz<-cosT){
+      const cx=(p[i]+p[i+3]+p[i+6])/3,cy=(p[i+1]+p[i+4]+p[i+7])/3,cz=(p[i+2]+p[i+5]+p[i+8])/3;
+      faces.push({nx,ny,nz,cx,cy,cz});
+    }
+  }
+  if(!faces.length)return[];
+  const clusters=[],ATOL=0.3;
+  for(const f of faces){
+    if(Math.abs(f.nx)>0.95||Math.abs(f.ny)>0.95||Math.abs(f.nz)>0.95)continue;
+    let found=false;
+    for(const c of clusters){
+      const dot=c.nx*f.nx+c.ny*f.ny+c.nz*f.nz;
+      if(Math.abs(dot)>1-ATOL){
+        const sign=dot>0?1:-1;
+        c.ds.push(sign*(c.nx*f.cx+c.ny*f.cy+c.nz*f.cz));
+        c.count++;found=true;break;
+      }
+    }
+    if(!found){
+      const[nnx,nny,nnz]=canonicalizeNormal(f.nx,f.ny,f.nz);
+      clusters.push({nx:nnx,ny:nny,nz:nnz,ds:[nnx*f.cx+nny*f.cy+nnz*f.cz],count:1});
+    }
+  }
+  const cands=[];
+  clusters.sort((a,b)=>b.count-a.count);
+  for(let ci=0;ci<Math.min(clusters.length,6);ci++){
+    const c=clusters[ci];if(c.count<3)continue;
+    const normal=[c.nx,c.ny,c.nz];
+    const dVals=c.ds.slice().sort((a,b)=>a-b);
+    let dlo=Infinity,dhi=-Infinity;
+    for(let i=0;i<p.length;i+=3){
+      const dv=normal[0]*p[i]+normal[1]*p[i+1]+normal[2]*p[i+2];
+      if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
+    }
+    let j=0;
+    while(j<dVals.length){
+      const dv=dVals[j];
+      if(dv>dlo+0.1&&dv<dhi-0.1)cands.push({normal,d:dv+0.01});
+      const limit=dv+gap;while(j<dVals.length&&dVals[j]<=limit)j++;
+    }
+  }
+  return cands;
+}
+
+function scoreCutGeneral(pos,normal,d,threshDeg,minAreaMM2){
+  const[cnx,cny,cnz]=normal;
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const ohB=[0,0,0,0,0,0],ohA=[0,0,0,0,0,0];
+  for(let i=0;i<pos.length;i+=9){
+    const cv=cnx*(pos[i]+pos[i+3]+pos[i+6])/3+cny*(pos[i+1]+pos[i+4]+pos[i+7])/3+cnz*(pos[i+2]+pos[i+5]+pos[i+8])/3;
+    const oh=cv>=d?ohA:ohB;
+    const ax=pos[i+3]-pos[i],ay=pos[i+4]-pos[i+1],az=pos[i+5]-pos[i+2];
+    const bx=pos[i+6]-pos[i],by=pos[i+7]-pos[i+1],bz=pos[i+8]-pos[i+2];
+    const fnx=ay*bz-az*by,fny=az*bx-ax*bz,fnz=ax*by-ay*bx;
+    const len=Math.sqrt(fnx*fnx+fny*fny+fnz*fnz);
+    if(len<1e-12)continue;
+    const area=len*0.5;if(area<minAreaMM2)continue;
+    if(fnz/len<-cosT)oh[0]++;if(fnz/len>cosT)oh[1]++;
+    if(fnx/len<-cosT)oh[2]++;if(fnx/len>cosT)oh[3]++;
+    if(fny/len<-cosT)oh[4]++;if(fny/len>cosT)oh[5]++;
+  }
+  return Math.min(...ohB)+Math.min(...ohA);
+}
+
 async function processModel(pos,threshold,minArea,clusterGap,onProg){
   const t0=performance.now();
   onProg(10,'DETECTING OVERHANGS…');await tick();
@@ -564,25 +739,42 @@ function renderParts(parts,cuts,b){
   });
   // Coordinate mapping from STL space to THREE.js world: X→X, Z→Y, Y→−Z
   const sw=Math.max(b.xMax-b.xMin,b.yMax-b.yMin)*1.2;
-  cuts.forEach(({axis,val})=>{
-    const pg=new THREE.PlaneGeometry(sw,sw);
-    const pm=new THREE.MeshBasicMaterial({color:0x0066FF,transparent:true,opacity:0.06,depthWrite:false,side:THREE.DoubleSide});
-    const pl=new THREE.Mesh(pg,pm);
-    let lp1,lp2;
-    if(axis===2){              // Z cut → horizontal plane at THREE y=val
-      pl.rotation.x=-Math.PI/2;pl.position.y=val;
-      lp1=new THREE.Vector3(-sw/2,val,0);lp2=new THREE.Vector3(sw/2,val,0);
-    }else if(axis===0){        // X cut → vertical plane perpendicular to THREE x=val
-      pl.rotation.y=Math.PI/2;pl.position.x=val;
-      lp1=new THREE.Vector3(val,b.zMin,0);lp2=new THREE.Vector3(val,b.zMax,0);
-    }else{                     // Y cut → vertical plane at THREE z=−val
-      pl.position.z=-val;
-      lp1=new THREE.Vector3(-sw/2,0,-val);lp2=new THREE.Vector3(sw/2,0,-val);
+  cuts.forEach(cut=>{
+    if(cut.normal){
+      // Angled (rotated) cut plane
+      const[nx,ny,nz]=cut.normal;
+      const pg=new THREE.PlaneGeometry(sw,sw);
+      const pm=new THREE.MeshBasicMaterial({color:0xFF6600,transparent:true,opacity:0.06,depthWrite:false,side:THREE.DoubleSide});
+      const pl=new THREE.Mesh(pg,pm);
+      const threeN=new THREE.Vector3(nx,nz,-ny).normalize();
+      const origin=new THREE.Vector3(cut.d*nx,cut.d*nz,-cut.d*ny);
+      pl.position.copy(origin);
+      const q=new THREE.Quaternion();
+      q.setFromUnitVectors(new THREE.Vector3(0,0,1),threeN);
+      pl.quaternion.copy(q);
+      scene.add(pl);cutObjs.push(pl);
+      let tVec=new THREE.Vector3(1,0,0);
+      if(Math.abs(threeN.dot(tVec))>0.9)tVec=new THREE.Vector3(0,1,0);
+      const tangent=new THREE.Vector3().crossVectors(threeN,tVec).normalize().multiplyScalar(sw/2);
+      const lp1=origin.clone().add(tangent),lp2=origin.clone().sub(tangent);
+      const lg=new THREE.BufferGeometry().setFromPoints([lp1,lp2]);
+      const lm=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0xFF6600,opacity:0.35,transparent:true}));
+      scene.add(lm);cutObjs.push(lm);
+    }else{
+      // Axis-aligned cut plane
+      const{axis,val}=cut;
+      const pg=new THREE.PlaneGeometry(sw,sw);
+      const pm=new THREE.MeshBasicMaterial({color:0x0066FF,transparent:true,opacity:0.06,depthWrite:false,side:THREE.DoubleSide});
+      const pl=new THREE.Mesh(pg,pm);
+      let lp1,lp2;
+      if(axis===2){pl.rotation.x=-Math.PI/2;pl.position.y=val;lp1=new THREE.Vector3(-sw/2,val,0);lp2=new THREE.Vector3(sw/2,val,0)}
+      else if(axis===0){pl.rotation.y=Math.PI/2;pl.position.x=val;lp1=new THREE.Vector3(val,b.zMin,0);lp2=new THREE.Vector3(val,b.zMax,0)}
+      else{pl.position.z=-val;lp1=new THREE.Vector3(-sw/2,0,-val);lp2=new THREE.Vector3(sw/2,0,-val)}
+      scene.add(pl);cutObjs.push(pl);
+      const lg=new THREE.BufferGeometry().setFromPoints([lp1,lp2]);
+      const lm=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0x0066FF,opacity:0.35,transparent:true}));
+      scene.add(lm);cutObjs.push(lm);
     }
-    scene.add(pl);cutObjs.push(pl);
-    const lg=new THREE.BufferGeometry().setFromPoints([lp1,lp2]);
-    const lm=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0x0066FF,opacity:0.35,transparent:true}));
-    scene.add(lm);cutObjs.push(lm);
   });
   fitCamera(b);
   grid.position.y=b.zMin;
@@ -683,7 +875,13 @@ procBtn.addEventListener('click',async()=>{
     $('s-oh').textContent=ohFaces.toLocaleString();
     $('s-pct').textContent=ohAreaPct.toFixed(1)+'%';
     $('s-cuts').textContent=cuts.length;
-    $('cut-tags').innerHTML=cuts.map(({axis,val})=>`<div class="cut-tag">${['X','Y','Z'][axis]}=${val.toFixed(2)}</div>`).join('');
+    $('cut-tags').innerHTML=cuts.map(cut=>{
+      if(cut.normal){
+        const angle=Math.round(Math.acos(Math.min(1,Math.abs(cut.normal[2])))*180/Math.PI);
+        return`<div class="cut-tag cut-tag-angled">∠${angle}° d=${cut.d.toFixed(2)}</div>`;
+      }
+      return`<div class="cut-tag">${['X','Y','Z'][cut.axis]}=${cut.val.toFixed(2)}</div>`;
+    }).join('');
     $('warn-list').innerHTML=warnings.map(w=>`<div class="warn-item"><span>&#9888;</span><span>${w}</span></div>`).join('');
 
     const names=parts.map((_,i)=>`part_${String(i+1).padStart(2,'0')}.stl`);
