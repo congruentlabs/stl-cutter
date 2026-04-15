@@ -238,12 +238,20 @@ function detectOverhangs(pos,threshDeg,minAreaMM2){
 }
 
 /* ================================================================
-   MULTI-AXIS CUT ENGINE
-   Scores every candidate cut plane (X, Y, or Z axis) by how much it
-   reduces the total minimum-overhang count when each resulting piece
-   is evaluated in its best axis-aligned print orientation.  Greedy
-   iteration picks the highest-scoring cut until no improvement remains
-   or the maximum number of parts is reached.
+   SHAPE-AWARE CUT ENGINE
+   Two-phase approach for intelligent model sectioning:
+   Phase 1 (coarse): fast overhang-count scoring across axis-aligned,
+   evenly-spaced, and angled candidate planes to identify promising
+   cut positions.
+   Phase 2 (detailed): for the top candidates, partition triangles
+   and evaluate each resulting piece in all 6 print orientations.
+   Scoring priority:
+     1. Maximise pieces that become fully printable (0 overhangs)
+     2. Keep printable sections as large as possible
+     3. Minimise remaining overhang count
+     4. Prefer cuts at natural narrowings (fewer crossing triangles)
+   Greedy iteration: make the best cut, re-analyse all pieces,
+   repeat until every piece is printable or no improvement remains.
    ================================================================ */
 
 // Minimum overhang face count across all 6 axis-aligned print orientations.
@@ -310,41 +318,146 @@ function getCandidatesForAxis(p,axis,plo,phi,gap,threshDeg,minAreaMM2){
   return planes.filter(v=>v>plo+0.1&&v<phi-0.1);
 }
 
+// Quick partition of triangles by centroid relative to an axis-aligned plane.
+// Used for fast scoring in Phase 2 without expensive clipping.
+function partitionFacesByAxis(pos,axis,val){
+  const below=[],above=[];
+  for(let i=0;i<pos.length;i+=9){
+    const cv=(pos[i+axis]+pos[i+3+axis]+pos[i+6+axis])/3;
+    const target=cv>=val?above:below;
+    for(let j=0;j<9;j++)target.push(pos[i+j]);
+  }
+  return{below:new Float32Array(below),above:new Float32Array(above)};
+}
+
+// Quick partition of triangles by centroid relative to a general plane.
+function partitionFacesByNormal(pos,normal,d){
+  const[nx,ny,nz]=normal;
+  const below=[],above=[];
+  for(let i=0;i<pos.length;i+=9){
+    const cv=nx*(pos[i]+pos[i+3]+pos[i+6])/3+ny*(pos[i+1]+pos[i+4]+pos[i+7])/3+nz*(pos[i+2]+pos[i+5]+pos[i+8])/3;
+    const target=cv>=d?above:below;
+    for(let j=0;j<9;j++)target.push(pos[i+j]);
+  }
+  return{below:new Float32Array(below),above:new Float32Array(above)};
+}
+
+// Count triangles that straddle the cut plane. Fewer crossing triangles
+// indicates the plane passes through a natural narrowing in the shape.
+function countCrossingTris(pos,axis,val){
+  let c=0;
+  for(let i=0;i<pos.length;i+=9){
+    const v0=pos[i+axis],v1=pos[i+3+axis],v2=pos[i+6+axis];
+    if(Math.min(v0,v1,v2)<val&&Math.max(v0,v1,v2)>val)c++;
+  }
+  return c;
+}
+function countCrossingTrisGeneral(pos,normal,d){
+  const[nx,ny,nz]=normal;let c=0;
+  for(let i=0;i<pos.length;i+=9){
+    const d0=nx*pos[i]+ny*pos[i+1]+nz*pos[i+2];
+    const d1=nx*pos[i+3]+ny*pos[i+4]+nz*pos[i+5];
+    const d2=nx*pos[i+6]+ny*pos[i+7]+nz*pos[i+8];
+    if(Math.min(d0,d1,d2)<d&&Math.max(d0,d1,d2)>d)c++;
+  }
+  return c;
+}
+
+// Detailed evaluation of a cut: partitions faces and checks each piece
+// in all 6 print orientations.  Returns null for cuts that produce
+// tiny slivers (< 1 % of the original face count).
+function evaluateCutQuality(below,above,totalFaces,threshDeg,minAreaMM2,crossing){
+  const minPieceFaces=Math.max(3,Math.floor(totalFaces*0.01));
+  const bF=below.length/9,aF=above.length/9;
+  if(bF<minPieceFaces||aF<minPieceFaces)return null;
+  const ohB=minOverhangsAllOrientations(below,threshDeg,minAreaMM2);
+  const ohA=minOverhangsAllOrientations(above,threshDeg,minAreaMM2);
+  const resolvedCount=(ohB===0?1:0)+(ohA===0?1:0);
+  const maxCleanFaces=Math.max(ohB===0?bF:0,ohA===0?aF:0);
+  return{resolvedCount,maxCleanFaces,totalOH:ohB+ohA,crossing,belowFaces:bF,aboveFaces:aF};
+}
+
+// Compare two cut evaluations: true if `a` is strictly better than `b`.
+// Priority: most resolved pieces → largest clean section →
+// fewest total overhangs → fewest crossing triangles (natural cut).
+function isBetterCut(a,b){
+  if(!a)return false;if(!b)return true;
+  if(a.resolvedCount!==b.resolvedCount)return a.resolvedCount>b.resolvedCount;
+  if(a.maxCleanFaces!==b.maxCleanFaces)return a.maxCleanFaces>b.maxCleanFaces;
+  if(a.totalOH!==b.totalOH)return a.totalOH<b.totalOH;
+  return a.crossing<b.crossing;
+}
+
 async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
-  const MAX_PARTS=8;
+  const MAX_PARTS=12;
   const cuts=[];let parts=[pos];
   for(let iter=0;iter<MAX_PARTS-1;iter++){
-    onProg(30+iter*8,`EVALUATING CUTS (${iter+1})…`);await tick();
-    let bestImprovement=0,bestCut=null,bestPartIdx=-1;
+    onProg(30+iter*5,`ANALYSING SHAPE · PASS ${iter+1}…`);await tick();
+    // Check if all parts are already printable
+    let anyNeedsCut=false;
+    for(const p of parts){if(minOverhangsAllOrientations(p,threshDeg,minAreaMM2)>0){anyNeedsCut=true;break}}
+    if(!anyNeedsCut)break;
+    let bestEval=null,bestCut=null,bestPartIdx=-1;
     for(let pi=0;pi<parts.length;pi++){
       const p=parts[pi];
       const baseMOH=minOverhangsAllOrientations(p,threshDeg,minAreaMM2);
       if(baseMOH===0)continue;
       let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
       for(let i=0;i<p.length;i+=3)for(let k=0;k<3;k++){if(p[i+k]<pLo[k])pLo[k]=p[i+k];if(p[i+k]>pHi[k])pHi[k]=p[i+k];}
-      // Axis-aligned candidates
+      const totalFaces=p.length/9;
+      // --- Phase 1: coarse scoring across all candidate planes ---
+      const candidates=[];
       for(let axis=0;axis<3;axis++){
-        const cands=getCandidatesForAxis(p,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
-        if(!cands.length)continue;
-        const step=Math.max(1,Math.floor(cands.length/20));
-        for(let ci=0;ci<cands.length;ci+=step){
-          const val=cands[ci];
+        const range=pHi[axis]-pLo[axis];
+        if(range<0.2)continue;
+        // Overhang-based candidates
+        const ohCands=getCandidatesForAxis(p,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
+        // Evenly-spaced candidates to probe natural narrowings in the shape
+        const nSteps=Math.max(10,Math.min(40,Math.ceil(range/(gap*0.5))));
+        for(let si=1;si<nSteps;si++){
+          const v=pLo[axis]+(range*si/nSteps);
+          if(v>pLo[axis]+0.1&&v<pHi[axis]-0.1)ohCands.push(v);
+        }
+        // Deduplicate
+        const seen=new Set();const unique=[];
+        for(const v of ohCands){const key=Math.round(v*50);if(!seen.has(key)){seen.add(key);unique.push(v)}}
+        unique.sort((a,b)=>a-b);
+        for(const val of unique){
           const score=scoreCut(p,axis,val,threshDeg,minAreaMM2);
-          const improvement=baseMOH-score;
-          if(improvement>bestImprovement){bestImprovement=improvement;bestCut={axis,val};bestPartIdx=pi;}
+          candidates.push({type:'axis',axis,val,coarseImp:baseMOH-score});
         }
       }
-      // Angled (rotated) candidates — cut planes oriented along overhang normals
+      // Angled candidates
       const angledCands=getCandidatesAngled(p,gap,threshDeg,minAreaMM2);
-      const angledStep=Math.max(1,Math.floor(angledCands.length/20));
-      for(let ci=0;ci<angledCands.length;ci+=angledStep){
-        const{normal,d}=angledCands[ci];
+      for(const{normal,d}of angledCands){
         const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
-        const improvement=baseMOH-score;
-        if(improvement>bestImprovement){bestImprovement=improvement;bestCut={normal,d};bestPartIdx=pi;}
+        candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
+      }
+      // --- Phase 2: detailed shape-aware evaluation of top candidates ---
+      candidates.sort((a,b)=>b.coarseImp-a.coarseImp);
+      const topN=Math.min(candidates.length,25);
+      for(let ci=0;ci<topN;ci++){
+        const cand=candidates[ci];
+        let below,above,crossing;
+        if(cand.type==='general'){
+          ({below,above}=partitionFacesByNormal(p,cand.normal,cand.d));
+          crossing=countCrossingTrisGeneral(p,cand.normal,cand.d);
+        }else{
+          ({below,above}=partitionFacesByAxis(p,cand.axis,cand.val));
+          crossing=countCrossingTris(p,cand.axis,cand.val);
+        }
+        const ev=evaluateCutQuality(below,above,totalFaces,threshDeg,minAreaMM2,crossing);
+        if(isBetterCut(ev,bestEval)){
+          bestEval=ev;bestPartIdx=pi;
+          bestCut=cand.type==='general'?{normal:cand.normal,d:cand.d}:{axis:cand.axis,val:cand.val};
+        }
       }
     }
-    if(!bestCut)break;
+    if(!bestCut||!bestEval)break;
+    // Stop if cut doesn't resolve any piece and doesn't reduce overhangs
+    const curMOH=minOverhangsAllOrientations(parts[bestPartIdx],threshDeg,minAreaMM2);
+    if(bestEval.resolvedCount===0&&bestEval.totalOH>=curMOH)break;
+    // Execute cut with proper clipping and cap generation
     let below,above;
     if(bestCut.normal){
       ({below,above}=sliceAtGeneralPlane(parts[bestPartIdx],bestCut.normal,bestCut.d));

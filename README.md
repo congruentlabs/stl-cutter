@@ -9,7 +9,10 @@ Detects overhanging faces in STL files and cuts the model into support-free part
 1. Upload a binary or ASCII STL (up to 200 MB)
 2. The app detects faces whose normals exceed the overhang threshold (default 45°)
 3. **Auto-orient** (optional): tests all 6 rectangular-prism (bounding-box) face orientations plus up to 60 unique mesh face normals and rotates the model to the orientation with the lowest overhang area — minimising the number of cuts needed before any slicing occurs
-4. A greedy interval-cover algorithm places the minimum number of horizontal cut planes needed so that every overhang face is within the cut tolerance of the cut plane below it
+4. **Shape-aware cutting** — a two-phase algorithm analyses the model and iteratively sections it:
+   - *Phase 1 (coarse)*: generates candidates from overhang positions, evenly-spaced probes along each axis, and angled planes; scores each with a fast overhang-count heuristic
+   - *Phase 2 (detailed)*: the top candidates are evaluated by partitioning the mesh and checking every resulting piece across all 6 print orientations; scoring prioritises (a) maximising fully-printable pieces, (b) keeping sections as large as possible, (c) minimising remaining overhangs, and (d) preferring natural narrowings in the model shape
+   - After each cut the remainder is re-analysed and the process repeats until every piece is printable or no further improvement is possible
 5. Each triangle crossing a cut plane is clipped using Sutherland-Hodgman, cut edges are chained into polygon loops and fan-triangulated to close the faces
 6. Parts are rendered in Three.js — click parts to isolate them, toggle visibility per-part
 7. Download as individual STLs or a ZIP
