@@ -218,9 +218,9 @@ function selectCutPlanes(zVals,gap,zMin,zMax){
   const planes=[];
   let i=0;
   while(i<zVals.length){
-    const cutZ=zVals[i];
-    planes.push(cutZ+0.01);
-    const limit=cutZ+gap;
+    const overhangZ=zVals[i]; // lowest Z of the first uncovered overhang in this group
+    planes.push(overhangZ+0.01); // +0.01 mm places the cut just above the overhang base so the face clips cleanly into the upper part
+    const limit=overhangZ+gap;
     while(i<zVals.length&&zVals[i]<=limit)i++;
   }
   return planes.filter(z=>z>zMin+0.1&&z<zMax-0.1);
