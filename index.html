@@ -836,9 +836,8 @@ function getShapeContourCandidates(p,gap){
       const dx=curr.c[0]-prev.c[0],dy=curr.c[1]-prev.c[1],dz=curr.c[2]-prev.c[2];
       const shift=Math.sqrt(dx*dx+dy*dy+dz*dz);
       if(shift>slabW*0.3){
-        const len=Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if(len<1e-6)continue;
-        let nx=dx/len,ny=dy/len,nz=dz/len;
+        if(shift<1e-6)continue;
+        let nx=dx/shift,ny=dy/shift,nz=dz/shift;
         if(Math.abs(nx)>0.98||Math.abs(ny)>0.98||Math.abs(nz)>0.98)continue;
         const[cnx,cny,cnz]=canonicalizeNormal(nx,ny,nz);
         const mid=[(prev.c[0]+curr.c[0])/2,(prev.c[1]+curr.c[1])/2,(prev.c[2]+curr.c[2])/2];
@@ -858,7 +857,7 @@ function getShapeContourCandidates(p,gap){
     for(let pi=0;pi<nPhi;pi++){
       const pr=pi*2*Math.PI/nPhi;
       const nx=Math.sin(tr)*Math.cos(pr),ny=Math.sin(tr)*Math.sin(pr),nz=Math.cos(tr);
-      if(Math.abs(nx)>0.95||Math.abs(ny)>0.95||Math.abs(nz)>0.95)continue;
+      if(Math.abs(nx)>0.98||Math.abs(ny)>0.98||Math.abs(nz)>0.98)continue;
       testNormals.push(canonicalizeNormal(nx,ny,nz));
     }
   }
