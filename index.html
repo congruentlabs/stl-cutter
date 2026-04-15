@@ -238,20 +238,20 @@ function detectOverhangs(pos,threshDeg,minAreaMM2){
 }
 
 /* ================================================================
-   SHAPE-AWARE CUT ENGINE
-   Two-phase approach for intelligent model sectioning:
-   Phase 1 (coarse): fast overhang-count scoring across axis-aligned,
-   evenly-spaced, and angled candidate planes to identify promising
-   cut positions.
-   Phase 2 (detailed): for the top candidates, partition triangles
-   and evaluate each resulting piece in all 6 print orientations.
-   Scoring priority:
-     1. Maximise pieces that become fully printable (0 overhangs)
-     2. Keep printable sections as large as possible
-     3. Minimise remaining overhang count
-     4. Prefer cuts at natural narrowings (fewer crossing triangles)
-   Greedy iteration: make the best cut, re-analyse all pieces,
-   repeat until every piece is printable or no improvement remains.
+   RECURSIVE SEGMENTATION CUT ENGINE
+   Recursively identifies where to cut by growing printable regions:
+   1. Start from each end of the piece along each axis (and angled
+      normals), growing the sub-piece until supports would be needed.
+   2. Binary-search the exact boundary between printable and
+      non-printable to maximise each extracted segment.
+   3. Cut off the largest printable segment found, then recursively
+      process the remainder (parts B, C, etc.).
+   4. Fallback: when no printable sub-piece can be grown, use
+      coarse scoring + detailed evaluation (Phase 1+2) to find
+      the single best split.
+   This produces fewer cuts because each cut extracts the maximum
+   printable volume, and processing stops as soon as every piece
+   is printable in some orientation.
    ================================================================ */
 
 // Minimum overhang face count across all 6 axis-aligned print orientations.
@@ -388,94 +388,181 @@ function isBetterCut(a,b){
   return a.crossing<b.crossing;
 }
 
+// Grow the largest sub-piece of `piece` that is printable (0 overhangs in
+// some orientation) by sweeping a cut plane from each end along axis-aligned
+// and angled directions.  A coarse scan identifies the printable/non-printable
+// transition, then binary search refines to maximise the printable segment.
+// Returns {cut, printableSize} or null if nothing is printable.
+function growPrintableSegment(piece,pLo,pHi,gap,threshDeg,minAreaMM2){
+  const totalFaces=piece.length/9;
+  const minPieceFaces=Math.max(3,Math.floor(totalFaces*0.01));
+  let best=null;
+
+  // Generic grow-and-refine along a parameterised cut direction.
+  // paramFn(frac) => {testPiece, remainder, cut}
+  function tryGrow(paramFn,coarseSteps,refineSteps){
+    let lastOK=-1,firstFail=-1;
+    for(let s=1;s<coarseSteps;s++){
+      const frac=s/coarseSteps;
+      const{testPiece,remainder}=paramFn(frac);
+      if(testPiece.length/9<minPieceFaces||remainder.length/9<minPieceFaces)continue;
+      if(minOverhangsAllOrientations(testPiece,threshDeg,minAreaMM2)===0){
+        lastOK=frac;
+      }else{firstFail=frac;break}
+    }
+    if(lastOK<0)return;
+    // Binary search between lastOK and firstFail (or end)
+    if(firstFail>0){
+      let lo=lastOK,hi=firstFail;
+      for(let r=0;r<refineSteps;r++){
+        const mid=(lo+hi)/2;
+        const{testPiece,remainder}=paramFn(mid);
+        if(testPiece.length/9<minPieceFaces||remainder.length/9<minPieceFaces){hi=mid;continue}
+        if(minOverhangsAllOrientations(testPiece,threshDeg,minAreaMM2)===0){lo=mid;lastOK=mid}else{hi=mid}
+      }
+    }
+    const{testPiece,remainder,cut}=paramFn(lastOK);
+    if(testPiece.length/9>=minPieceFaces&&remainder.length/9>=minPieceFaces){
+      const sz=testPiece.length/9;
+      if(!best||sz>best.printableSize)best={cut,printableSize:sz};
+    }
+  }
+
+  // --- Axis-aligned growing: 3 axes × 2 directions ---
+  for(let axis=0;axis<3;axis++){
+    const range=pHi[axis]-pLo[axis];if(range<0.2)continue;
+    for(let dir=0;dir<2;dir++){
+      tryGrow(frac=>{
+        const val=dir===0?pLo[axis]+range*frac:pHi[axis]-range*frac;
+        const{below,above}=partitionFacesByAxis(piece,axis,val);
+        return{testPiece:dir===0?below:above,remainder:dir===0?above:below,cut:{axis,val}};
+      },20,8);
+    }
+  }
+
+  // --- Angled growing along normals from overhang clusters & contour analysis ---
+  const angledCands=getCandidatesAngled(piece,gap,threshDeg,minAreaMM2);
+  const contourCands=getShapeContourCandidates(piece,gap);
+  const nSet=new Set(),uNormals=[];
+  for(const{normal}of[...angledCands,...contourCands]){
+    const k=normal.map(v=>Math.round(v*50)).join(',');
+    if(!nSet.has(k)){nSet.add(k);uNormals.push(normal)}
+  }
+  for(const normal of uNormals.slice(0,15)){
+    let dlo=Infinity,dhi=-Infinity;
+    for(let i=0;i<piece.length;i+=3){
+      const dv=normal[0]*piece[i]+normal[1]*piece[i+1]+normal[2]*piece[i+2];
+      if(dv<dlo)dlo=dv;if(dv>dhi)dhi=dv;
+    }
+    const dRange=dhi-dlo;if(dRange<0.2)continue;
+    for(let dir=0;dir<2;dir++){
+      tryGrow(frac=>{
+        const d=dir===0?dlo+dRange*frac:dhi-dRange*frac;
+        const{below,above}=partitionFacesByNormal(piece,normal,d);
+        return{testPiece:dir===0?below:above,remainder:dir===0?above:below,cut:{normal,d}};
+      },15,6);
+    }
+  }
+  return best;
+}
+
+// Fallback when growing fails: use coarse scoring (Phase 1) followed by
+// detailed evaluation (Phase 2) to find the single best cut for a piece.
+function findBestFallbackCut(piece,pLo,pHi,gap,threshDeg,minAreaMM2){
+  const baseMOH=minOverhangsAllOrientations(piece,threshDeg,minAreaMM2);
+  const totalFaces=piece.length/9;
+  const candidates=[];
+  for(let axis=0;axis<3;axis++){
+    const range=pHi[axis]-pLo[axis];if(range<0.2)continue;
+    const ohCands=getCandidatesForAxis(piece,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
+    const nSteps=Math.max(10,Math.min(40,Math.ceil(range/(gap*0.5))));
+    for(let si=1;si<nSteps;si++){
+      const v=pLo[axis]+(range*si/nSteps);
+      if(v>pLo[axis]+0.1&&v<pHi[axis]-0.1)ohCands.push(v);
+    }
+    const seen=new Set(),unique=[];
+    for(const v of ohCands){const key=Math.round(v*50);if(!seen.has(key)){seen.add(key);unique.push(v)}}
+    for(const val of unique){
+      const score=scoreCut(piece,axis,val,threshDeg,minAreaMM2);
+      candidates.push({type:'axis',axis,val,coarseImp:baseMOH-score});
+    }
+  }
+  for(const{normal,d}of getCandidatesAngled(piece,gap,threshDeg,minAreaMM2)){
+    const score=scoreCutGeneral(piece,normal,d,threshDeg,minAreaMM2);
+    candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
+  }
+  for(const{normal,d}of getShapeContourCandidates(piece,gap)){
+    const score=scoreCutGeneral(piece,normal,d,threshDeg,minAreaMM2);
+    candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
+  }
+  candidates.sort((a,b)=>b.coarseImp-a.coarseImp);
+  let bestEval=null,bestCut=null;
+  const topN=Math.min(candidates.length,30);
+  for(let ci=0;ci<topN;ci++){
+    const cand=candidates[ci];let below,above,crossing;
+    if(cand.type==='general'){
+      ({below,above}=partitionFacesByNormal(piece,cand.normal,cand.d));
+      crossing=countCrossingTrisGeneral(piece,cand.normal,cand.d);
+    }else{
+      ({below,above}=partitionFacesByAxis(piece,cand.axis,cand.val));
+      crossing=countCrossingTris(piece,cand.axis,cand.val);
+    }
+    const ev=evaluateCutQuality(below,above,totalFaces,threshDeg,minAreaMM2,crossing);
+    if(isBetterCut(ev,bestEval)){
+      bestEval=ev;bestCut=cand.type==='general'?{normal:cand.normal,d:cand.d}:{axis:cand.axis,val:cand.val};
+    }
+  }
+  if(!bestCut||!bestEval)return null;
+  if(bestEval.resolvedCount===0&&bestEval.totalOH>=baseMOH)return null;
+  return bestCut;
+}
+
 async function selectOptimalCuts(pos,threshDeg,minAreaMM2,gap,bounds,onProg){
   const MAX_PARTS=12;
-  const cuts=[];let parts=[pos];
-  for(let iter=0;iter<MAX_PARTS-1;iter++){
-    onProg(30+iter*5,`ANALYSING SHAPE · PASS ${iter+1}…`);await tick();
-    // Check if all parts are already printable
-    let anyNeedsCut=false;
-    for(const p of parts){if(minOverhangsAllOrientations(p,threshDeg,minAreaMM2)>0){anyNeedsCut=true;break}}
-    if(!anyNeedsCut)break;
-    let bestEval=null,bestCut=null,bestPartIdx=-1;
-    for(let pi=0;pi<parts.length;pi++){
-      const p=parts[pi];
-      const baseMOH=minOverhangsAllOrientations(p,threshDeg,minAreaMM2);
-      if(baseMOH===0)continue;
-      let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
-      for(let i=0;i<p.length;i+=3)for(let k=0;k<3;k++){if(p[i+k]<pLo[k])pLo[k]=p[i+k];if(p[i+k]>pHi[k])pHi[k]=p[i+k];}
-      const totalFaces=p.length/9;
-      // --- Phase 1: coarse scoring across all candidate planes ---
-      const candidates=[];
-      for(let axis=0;axis<3;axis++){
-        const range=pHi[axis]-pLo[axis];
-        if(range<0.2)continue;
-        // Overhang-based candidates
-        const ohCands=getCandidatesForAxis(p,axis,pLo[axis],pHi[axis],gap,threshDeg,minAreaMM2);
-        // Evenly-spaced candidates to probe natural narrowings in the shape
-        const nSteps=Math.max(10,Math.min(40,Math.ceil(range/(gap*0.5))));
-        for(let si=1;si<nSteps;si++){
-          const v=pLo[axis]+(range*si/nSteps);
-          if(v>pLo[axis]+0.1&&v<pHi[axis]-0.1)ohCands.push(v);
-        }
-        // Deduplicate
-        const seen=new Set();const unique=[];
-        for(const v of ohCands){const key=Math.round(v*50);if(!seen.has(key)){seen.add(key);unique.push(v)}}
-        unique.sort((a,b)=>a-b);
-        for(const val of unique){
-          const score=scoreCut(p,axis,val,threshDeg,minAreaMM2);
-          candidates.push({type:'axis',axis,val,coarseImp:baseMOH-score});
-        }
+  const cuts=[],finalParts=[],workQueue=[pos];
+  let pass=0;
+  while(workQueue.length>0&&finalParts.length+workQueue.length<=MAX_PARTS){
+    const piece=workQueue.shift();pass++;
+    onProg(30+Math.min(55,pass*5),`RECURSIVE SEGMENTATION · PASS ${pass}…`);await tick();
+    // Already printable in some orientation → accept
+    if(minOverhangsAllOrientations(piece,threshDeg,minAreaMM2)===0){finalParts.push(piece);continue}
+    // Piece bounds
+    let pLo=[Infinity,Infinity,Infinity],pHi=[-Infinity,-Infinity,-Infinity];
+    for(let i=0;i<piece.length;i+=3)for(let k=0;k<3;k++){if(piece[i+k]<pLo[k])pLo[k]=piece[i+k];if(piece[i+k]>pHi[k])pHi[k]=piece[i+k]}
+    // Strategy 1: Grow the largest printable sub-piece from each end
+    const grow=growPrintableSegment(piece,pLo,pHi,gap,threshDeg,minAreaMM2);
+    if(grow){
+      let below,above;
+      if(grow.cut.normal){({below,above}=sliceAtGeneralPlane(piece,grow.cut.normal,grow.cut.d))}
+      else{({below,above}=sliceAtPlane(piece,grow.cut.axis,grow.cut.val))}
+      cuts.push(grow.cut);
+      // After proper clipping, identify which side is the printable piece
+      const mohB=below.length>=9?minOverhangsAllOrientations(below,threshDeg,minAreaMM2):Infinity;
+      const mohA=above.length>=9?minOverhangsAllOrientations(above,threshDeg,minAreaMM2):Infinity;
+      if(mohB===0&&below.length>=9){
+        finalParts.push(below);if(above.length>=9)workQueue.push(above);
+      }else if(mohA===0&&above.length>=9){
+        finalParts.push(above);if(below.length>=9)workQueue.push(below);
+      }else{
+        // Partition approximation differs from actual slice — re-queue both
+        if(below.length>=9)workQueue.push(below);if(above.length>=9)workQueue.push(above);
       }
-      // Angled candidates from overhang face normals
-      const angledCands=getCandidatesAngled(p,gap,threshDeg,minAreaMM2);
-      for(const{normal,d}of angledCands){
-        const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
-        candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
-      }
-      // Shape-contour candidates (bends and cross-section narrowings)
-      const contourCands=getShapeContourCandidates(p,gap);
-      for(const{normal,d}of contourCands){
-        const score=scoreCutGeneral(p,normal,d,threshDeg,minAreaMM2);
-        candidates.push({type:'general',normal,d,coarseImp:baseMOH-score});
-      }
-      // --- Phase 2: detailed shape-aware evaluation of top candidates ---
-      candidates.sort((a,b)=>b.coarseImp-a.coarseImp);
-      const topN=Math.min(candidates.length,30);
-      for(let ci=0;ci<topN;ci++){
-        const cand=candidates[ci];
-        let below,above,crossing;
-        if(cand.type==='general'){
-          ({below,above}=partitionFacesByNormal(p,cand.normal,cand.d));
-          crossing=countCrossingTrisGeneral(p,cand.normal,cand.d);
-        }else{
-          ({below,above}=partitionFacesByAxis(p,cand.axis,cand.val));
-          crossing=countCrossingTris(p,cand.axis,cand.val);
-        }
-        const ev=evaluateCutQuality(below,above,totalFaces,threshDeg,minAreaMM2,crossing);
-        if(isBetterCut(ev,bestEval)){
-          bestEval=ev;bestPartIdx=pi;
-          bestCut=cand.type==='general'?{normal:cand.normal,d:cand.d}:{axis:cand.axis,val:cand.val};
-        }
-      }
+      continue;
     }
-    if(!bestCut||!bestEval)break;
-    // Stop if cut doesn't resolve any piece and doesn't reduce overhangs
-    const curMOH=minOverhangsAllOrientations(parts[bestPartIdx],threshDeg,minAreaMM2);
-    if(bestEval.resolvedCount===0&&bestEval.totalOH>=curMOH)break;
-    // Execute cut with proper clipping and cap generation
-    let below,above;
-    if(bestCut.normal){
-      ({below,above}=sliceAtGeneralPlane(parts[bestPartIdx],bestCut.normal,bestCut.d));
+    // Strategy 2: Fallback to best-cut evaluation when growing fails
+    const fallback=findBestFallbackCut(piece,pLo,pHi,gap,threshDeg,minAreaMM2);
+    if(fallback){
+      let below,above;
+      if(fallback.normal){({below,above}=sliceAtGeneralPlane(piece,fallback.normal,fallback.d))}
+      else{({below,above}=sliceAtPlane(piece,fallback.axis,fallback.val))}
+      cuts.push(fallback);
+      if(below.length>=9)workQueue.push(below);if(above.length>=9)workQueue.push(above);
     }else{
-      ({below,above}=sliceAtPlane(parts[bestPartIdx],bestCut.axis,bestCut.val));
+      finalParts.push(piece); // No valid cut — accept as-is
     }
-    const newParts=[...parts];newParts.splice(bestPartIdx,1);
-    if(below.length>=9)newParts.push(below);
-    if(above.length>=9)newParts.push(above);
-    parts=newParts;cuts.push(bestCut);
   }
-  return{cuts,parts};
+  finalParts.push(...workQueue); // remaining unprocessed pieces
+  return{cuts,parts:finalParts};
 }
 
 /* ================================================================
