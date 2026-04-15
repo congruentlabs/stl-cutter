@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STL Support Cutter</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090D;--s1:#0F1419;--s2:#161C24;--border:#1E2D3D;
+  --accent:#00FF9D;--blue:#0077FF;--text:#C8DCF0;--muted:#506070;
+  --warn:#FFB020;--danger:#FF4060;--sw:310px;--r:6px;
+  --mono:'Courier New',Courier,monospace;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;overflow:hidden;font-size:13px}
+#sidebar{width:var(--sw);min-width:var(--sw);background:var(--s1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden}
+#sidebar::-webkit-scrollbar{width:3px}
+#sidebar::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.logo{padding:18px 20px 14px;border-bottom:1px solid var(--border);background:linear-gradient(135deg,#0A1018,#0F1419)}
+.logo-title{font-family:var(--mono);font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent)}
+.logo-sub{font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);letter-spacing:.5px}
+.logo-badge{display:inline-block;margin-top:8px;padding:2px 7px;background:rgba(0,255,157,.08);border:1px solid rgba(0,255,157,.2);border-radius:3px;font-size:9px;font-family:var(--mono);color:var(--accent);letter-spacing:1px}
+.sec{padding:13px 16px;border-bottom:1px solid var(--border)}
+.sec-hd{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.sec-hd::before{content:'';display:block;width:3px;height:10px;background:var(--accent);border-radius:2px}
+#drop-zone{border:1px dashed var(--border);border-radius:var(--r);padding:20px 14px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;position:relative;background:var(--s2)}
+#drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
+#drop-zone:hover,#drop-zone.drag{border-color:var(--accent);background:rgba(0,255,157,.04)}
+.dz-ico{font-size:26px;margin-bottom:7px}
+.dz-main{font-size:12px;font-weight:500}
+.dz-sub{font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--mono)}
+#file-info{display:none;align-items:center;gap:8px;padding:9px 11px;background:var(--s2);border:1px solid var(--border);border-radius:var(--r)}
+.fi-ico{font-size:16px}
+.fi-name{flex:1;font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
+.fi-size{font-size:10px;color:var(--muted);font-family:var(--mono)}
+.fi-x{cursor:pointer;color:var(--muted);font-size:15px;line-height:1}
+.fi-x:hover{color:var(--danger)}
+.field{margin-bottom:11px}
+.field:last-child{margin-bottom:0}
+.field-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.field-lbl{font-size:11px;color:var(--muted)}
+.field-val{font-size:11px;font-weight:700;color:var(--accent);font-family:var(--mono);min-width:50px;text-align:right}
+input[type=range]{width:100%;-webkit-appearance:none;height:3px;background:var(--border);border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);cursor:pointer;box-shadow:0 0 6px rgba(0,255,157,.4)}
+#process-btn{width:100%;padding:10px;background:var(--accent);color:#000;border:none;border-radius:var(--r);font-size:12px;font-weight:800;letter-spacing:1px;text-transform:uppercase;cursor:pointer;font-family:var(--mono);transition:opacity .15s,box-shadow .15s}
+#process-btn:hover{box-shadow:0 0 16px rgba(0,255,157,.3)}
+#process-btn:active{opacity:.85}
+#process-btn:disabled{opacity:.3;cursor:not-allowed;box-shadow:none}
+#prog-wrap{display:none;margin-top:10px}
+.prog-bg{height:2px;background:var(--border);border-radius:1px;overflow:hidden}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--blue));border-radius:1px;transition:width .25s;width:0%}
+#prog-lbl{font-size:10px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
+#results{display:none}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.stat{background:var(--s2);border:1px solid var(--border);border-radius:var(--r);padding:9px 11px}
+.sv{font-size:18px;font-weight:700;font-family:var(--mono);line-height:1.1}
+.sl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-top:2px}
+.sv-g{color:var(--accent)}.sv-w{color:var(--warn)}.sv-b{color:var(--blue)}
+.cuts-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.cut-tag{font-size:9px;font-family:var(--mono);padding:3px 7px;background:rgba(0,119,255,.1);border:1px solid rgba(0,119,255,.25);border-radius:3px;color:#5599FF}
+.warn-list{margin-top:8px}
+.warn-item{font-size:10px;color:var(--warn);background:rgba(255,176,32,.06);border:1px solid rgba(255,176,32,.18);border-radius:var(--r);padding:7px 9px;margin-bottom:4px;line-height:1.4;display:flex;gap:6px}
+#part-list{display:flex;flex-direction:column;gap:5px}
+.part-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--r);padding:9px 11px;cursor:pointer;display:flex;align-items:center;gap:9px;transition:border-color .15s;user-select:none}
+.part-card:hover{border-color:var(--muted)}
+.part-card.active{border-color:var(--accent);background:rgba(0,255,157,.04)}
+.part-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.part-inf{flex:1;min-width:0}
+.part-nm{font-size:11px;font-weight:700;font-family:var(--mono)}
+.part-mt{font-size:10px;color:var(--muted);margin-top:1px;font-family:var(--mono)}
+.part-eye{font-size:12px;opacity:.4;cursor:pointer;padding:2px;border-radius:3px;transition:opacity .15s;flex-shrink:0}
+.part-eye:hover{opacity:1}
+.part-card.hidden-part .part-nm{opacity:.4}
+#dl-btn{width:100%;margin-top:10px;padding:9px;background:transparent;color:var(--accent);border:1px solid rgba(0,255,157,.3);border-radius:var(--r);font-size:11px;font-weight:700;font-family:var(--mono);letter-spacing:.5px;cursor:pointer;text-transform:uppercase;transition:background .15s,border-color .15s}
+#dl-btn:hover{background:rgba(0,255,157,.07);border-color:var(--accent)}
+#dl-btn:disabled{opacity:.4;cursor:not-allowed}
+#viewer{flex:1;position:relative;background:var(--bg);background-image:radial-gradient(circle,#1A2535 1px,transparent 1px);background-size:28px 28px;overflow:hidden}
+#canvas-wrap{position:absolute;inset:0}
+#canvas-wrap canvas{display:block;width:100%!important;height:100%!important}
+#empty-state{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;gap:10px}
+.es-ico{font-size:56px;opacity:.1}
+.es-txt{font-size:12px;color:var(--muted);opacity:.5;font-family:var(--mono)}
+.es-hint{font-size:10px;color:var(--muted);opacity:.3;font-family:var(--mono)}
+#vloader{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(7,9,13,.88);flex-direction:column;gap:14px}
+.spin{width:32px;height:32px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#vloader-lbl{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.hint-bar{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;opacity:0;transition:opacity .4s;pointer-events:none}
+.hint-bar.show{opacity:1}
+.hb-pill{background:rgba(0,0,0,.5);border:1px solid var(--border);border-radius:12px;padding:3px 9px;font-size:9px;color:var(--muted);font-family:var(--mono);white-space:nowrap}
+#reset-btn{position:absolute;top:12px;right:12px;background:rgba(0,0,0,.6);border:1px solid var(--border);color:var(--muted);border-radius:var(--r);padding:5px 10px;font-size:10px;font-family:var(--mono);cursor:pointer;display:none;letter-spacing:.5px;transition:color .15s}
+#reset-btn:hover{color:var(--text)}
+.perf-tag{position:absolute;top:12px;left:12px;background:rgba(0,0,0,.6);border:1px solid var(--border);border-radius:var(--r);padding:5px 10px;font-size:10px;font-family:var(--mono);color:var(--muted);display:none}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="logo">
+    <div class="logo-title">STL // CUTTER</div>
+    <div class="logo-sub">OVERHANG DETECTION &amp; SUPPORT ELIMINATION</div>
+    <div class="logo-badge">CLIENT-SIDE · NO SERVER</div>
+  </div>
+  <div class="sec">
+    <div class="sec-hd">Model File</div>
+    <div id="drop-zone">
+      <input type="file" id="file-input" accept=".stl">
+      <div class="dz-ico">📦</div>
+      <div class="dz-main">Drop STL or click to browse</div>
+      <div class="dz-sub">BINARY OR ASCII · MAX 200MB</div>
+    </div>
+    <div id="file-info">
+      <span class="fi-ico">📐</span>
+      <span class="fi-name" id="fi-name">—</span>
+      <span class="fi-size" id="fi-size">—</span>
+      <span class="fi-x" id="fi-clear">✕</span>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-hd">Settings</div>
+    <div class="field">
+      <div class="field-row"><span class="field-lbl">Overhang threshold</span><span class="field-val" id="v-thr">45°</span></div>
+      <input type="range" id="s-thr" min="20" max="70" value="45" step="1">
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-lbl">Min face area</span><span class="field-val" id="v-area">2.0mm²</span></div>
+      <input type="range" id="s-area" min="0.5" max="20" value="2" step="0.5">
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-lbl">Cluster gap</span><span class="field-val" id="v-gap">1.0mm</span></div>
+      <input type="range" id="s-gap" min="0.2" max="5" value="1" step="0.1">
+    </div>
+  </div>
+  <div class="sec">
+    <button id="process-btn" disabled>&#9654; ANALYSE &amp; CUT</button>
+    <div id="prog-wrap">
+      <div class="prog-bg"><div class="prog-fill" id="prog-fill"></div></div>
+      <div id="prog-lbl">—</div>
+    </div>
+  </div>
+  <div id="results">
+    <div class="sec">
+      <div class="sec-hd">Analysis</div>
+      <div class="stat-grid">
+        <div class="stat"><div class="sv" id="s-faces">—</div><div class="sl">Total Faces</div></div>
+        <div class="stat"><div class="sv sv-w" id="s-oh">—</div><div class="sl">Overhang Faces</div></div>
+        <div class="stat"><div class="sv sv-w" id="s-pct">—</div><div class="sl">OH Area</div></div>
+        <div class="stat"><div class="sv sv-b" id="s-cuts">—</div><div class="sl">Cuts Made</div></div>
+      </div>
+      <div class="cuts-row" id="cut-tags"></div>
+      <div class="warn-list" id="warn-list"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-hd">Parts</div>
+      <div id="part-list"></div>
+      <button id="dl-btn">&#11015; DOWNLOAD PARTS</button>
+    </div>
+  </div>
+</div>
+
+<div id="viewer">
+  <div id="canvas-wrap"></div>
+  <div id="empty-state">
+    <div class="es-ico">🖨</div>
+    <div class="es-txt">AWAITING STL INPUT</div>
+    <div class="es-hint">drag + drop or use the sidebar</div>
+  </div>
+  <div id="vloader">
+    <div class="spin"></div>
+    <div id="vloader-lbl">PROCESSING…</div>
+  </div>
+  <div class="hint-bar" id="hint-bar">
+    <div class="hb-pill">LMB · ROTATE</div>
+    <div class="hb-pill">SCROLL · ZOOM</div>
+    <div class="hb-pill">RMB · PAN</div>
+  </div>
+  <button id="reset-btn">&#8635; RESET VIEW</button>
+  <div class="perf-tag" id="perf-tag"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+'use strict';
+/* ================================================================
+   GEOMETRY ENGINE — all in STL coordinate space (Z = vertical)
+   Winding verified: case1 cap edge PAB→PAC, case2 cap edge PCB→PCA
+   ================================================================ */
+
+function lerp3(a,b,t){return[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t]}
+
+function detectOverhangs(pos,threshDeg,minAreaMM2){
+  const cosT=Math.cos((90-threshDeg)*Math.PI/180);
+  const zVals=[];let ohFaces=0,ohArea=0,totalArea=0;
+  for(let i=0;i<pos.length;i+=9){
+    const ax=pos[i+3]-pos[i],ay=pos[i+4]-pos[i+1],az=pos[i+5]-pos[i+2];
+    const bx=pos[i+6]-pos[i],by=pos[i+7]-pos[i+1],bz=pos[i+8]-pos[i+2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len<1e-12)continue;
+    const area=len*0.5;totalArea+=area;
+    if(nz/len<-cosT&&area>=minAreaMM2){
+      ohFaces++;ohArea+=area;
+      zVals.push(Math.min(pos[i+2],pos[i+5],pos[i+8]));
+    }
+  }
+  return{zVals:zVals.sort((a,b)=>a-b),totalFaces:pos.length/9,ohFaces,ohAreaPct:totalArea>0?ohArea/totalArea*100:0};
+}
+
+function selectCutPlanes(zVals,gap,zMin,zMax){
+  if(!zVals.length)return[];
+  const clusters=[[zVals[0]]];
+  for(let i=1;i<zVals.length;i++){
+    const last=clusters[clusters.length-1];
+    if(zVals[i]-last[last.length-1]<=gap)last.push(zVals[i]);
+    else clusters.push([zVals[i]]);
+  }
+  return clusters.map(c=>Math.min(...c)+0.01).filter(z=>z>zMin+0.1&&z<zMax-0.1);
+}
+
+function buildCap(cutEdges,z,normalUp){
+  if(!cutEdges.length)return[];
+  const P=4,key=p=>p[0].toFixed(P)+'|'+p[1].toFixed(P);
+  const edges=normalUp?cutEdges:cutEdges.map(([p1,p2])=>[p2,p1]);
+  const adj=new Map();
+  for(const[p1,p2]of edges)adj.set(key(p1),{from:p1,to:p2});
+  const visited=new Set(),tris=[];
+  for(const[sk]of adj){
+    if(visited.has(sk))continue;
+    const loop=[];let ck=sk,safety=adj.size+2;
+    while(adj.has(ck)&&!visited.has(ck)&&safety-->0){
+      visited.add(ck);const e=adj.get(ck);loop.push(e.from);ck=key(e.to);
+    }
+    if(loop.length<3)continue;
+    const cx=loop.reduce((s,p)=>s+p[0],0)/loop.length;
+    const cy=loop.reduce((s,p)=>s+p[1],0)/loop.length;
+    for(let i=0;i<loop.length;i++){
+      const a=loop[i],b=loop[(i+1)%loop.length];
+      tris.push(cx,cy,z,a[0],a[1],z,b[0],b[1],z);
+    }
+  }
+  return tris;
+}
+
+function sliceAtZ(pos,z){
+  const below=[],above=[],cuts=[];
+  for(let i=0;i<pos.length;i+=9){
+    const v=[[pos[i],pos[i+1],pos[i+2]],[pos[i+3],pos[i+4],pos[i+5]],[pos[i+6],pos[i+7],pos[i+8]]];
+    const abv=v.map(p=>p[2]>=z);const n=abv.filter(Boolean).length;
+    if(n===3){above.push(...v[0],...v[1],...v[2]);continue}
+    if(n===0){below.push(...v[0],...v[1],...v[2]);continue}
+    if(n===1){
+      const li=abv.indexOf(true),pi=[0,1,2].filter(j=>j!==li);
+      const A=v[li],B=v[pi[0]],C=v[pi[1]];
+      const PAB=lerp3(A,B,(z-A[2])/(B[2]-A[2]));PAB[2]=z;
+      const PAC=lerp3(A,C,(z-A[2])/(C[2]-A[2]));PAC[2]=z;
+      above.push(...A,...PAB,...PAC);
+      below.push(...B,...C,...PAB,...PAB,...C,...PAC);
+      cuts.push([PAB,PAC]);
+    }else{
+      const li=abv.indexOf(false),pi=[0,1,2].filter(j=>j!==li);
+      const C=v[li],A=v[pi[0]],B=v[pi[1]];
+      const PCA=lerp3(C,A,(z-C[2])/(A[2]-C[2]));PCA[2]=z;
+      const PCB=lerp3(C,B,(z-C[2])/(B[2]-C[2]));PCB[2]=z;
+      below.push(...C,...PCA,...PCB);
+      above.push(...A,...B,...PCA,...PCA,...B,...PCB);
+      cuts.push([PCB,PCA]);
+    }
+  }
+  const bC=buildCap(cuts,z,true),aC=buildCap(cuts,z,false);
+  return{below:new Float32Array([...below,...bC]),above:new Float32Array([...above,...aC])};
+}
+
+async function processModel(pos,threshold,minArea,clusterGap,onProg){
+  const t0=performance.now();
+  onProg(10,'DETECTING OVERHANGS…');await tick();
+  const{zVals,totalFaces,ohFaces,ohAreaPct}=detectOverhangs(pos,threshold,minArea);
+  let xMin=1e9,yMin=1e9,zMin=1e9,xMax=-1e9,yMax=-1e9,zMax=-1e9;
+  for(let i=0;i<pos.length;i+=3){
+    if(pos[i]<xMin)xMin=pos[i];if(pos[i]>xMax)xMax=pos[i];
+    if(pos[i+1]<yMin)yMin=pos[i+1];if(pos[i+1]>yMax)yMax=pos[i+1];
+    if(pos[i+2]<zMin)zMin=pos[i+2];if(pos[i+2]>zMax)zMax=pos[i+2];
+  }
+  const cutPlanes=selectCutPlanes(zVals,clusterGap,zMin,zMax);
+  const warnings=[];
+  if(ohFaces===0)warnings.push('No significant overhangs detected — model can print as-is.');
+  if(ohFaces>0&&cutPlanes.length===0)warnings.push('Overhangs detected but no valid cut planes found.');
+  onProg(30,`${ohFaces} OH FACES · ${cutPlanes.length} CUT(S)`);await tick();
+  let parts=[pos];
+  for(let ci=0;ci<cutPlanes.length;ci++){
+    onProg(35+ci*(55/Math.max(cutPlanes.length,1)),`CUTTING Z=${cutPlanes[ci].toFixed(2)}mm…`);await tick();
+    const next=[];
+    for(const p of parts){
+      if(p.length<9)continue;
+      const{below,above}=sliceAtZ(p,cutPlanes[ci]);
+      if(below.length>=9)next.push(below);
+      if(above.length>=9)next.push(above);
+    }
+    if(next.length)parts=next;
+  }
+  for(let i=0;i<parts.length;i++){
+    const{ohFaces:rem}=detectOverhangs(parts[i],threshold,minArea);
+    if(rem>0)warnings.push(`Part ${i+1}: ${rem} overhang face(s) remain — consider manual adjustment.`);
+  }
+  const elapsed=((performance.now()-t0)/1000).toFixed(2);
+  onProg(100,`DONE (${elapsed}s)`);
+  return{parts,cutPlanes,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds:{xMin,yMin,zMin,xMax,yMax,zMax}};
+}
+
+const tick=()=>new Promise(r=>setTimeout(r,0));
+
+/* ================================================================
+   BINARY STL EXPORT
+   ================================================================ */
+function toSTLBuffer(pos){
+  const n=pos.length/9,buf=new ArrayBuffer(84+n*50),dv=new DataView(buf);
+  dv.setUint32(80,n,true);let off=84;
+  for(let i=0;i<pos.length;i+=9){
+    const ax=pos[i+3]-pos[i],ay=pos[i+4]-pos[i+1],az=pos[i+5]-pos[i+2];
+    const bx=pos[i+6]-pos[i],by=pos[i+7]-pos[i+1],bz=pos[i+8]-pos[i+2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const l=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
+    dv.setFloat32(off,nx/l,true);off+=4;dv.setFloat32(off,ny/l,true);off+=4;dv.setFloat32(off,nz/l,true);off+=4;
+    for(let j=0;j<9;j+=3){dv.setFloat32(off,pos[i+j],true);off+=4;dv.setFloat32(off,pos[i+j+1],true);off+=4;dv.setFloat32(off,pos[i+j+2],true);off+=4;}
+    dv.setUint16(off,0,true);off+=2;
+  }
+  return buf;
+}
+
+/* ================================================================
+   THREE.JS SCENE
+   ================================================================ */
+const COLORS=[0x00FF9D,0x0088FF,0xFF6040,0xFFCC00,0xCC44FF,0x00CCFF,0xFF4488,0x44FF88];
+const cWrap=document.getElementById('canvas-wrap');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+cWrap.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x07090D);
+const camera=new THREE.PerspectiveCamera(45,1,0.01,1e6);
+const controls=new THREE.OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true;controls.dampingFactor=0.07;
+scene.add(new THREE.AmbientLight(0xffffff,0.45));
+const dL=new THREE.DirectionalLight(0xffffff,0.75);dL.position.set(1,2,1.5);dL.castShadow=true;scene.add(dL);
+const fL=new THREE.DirectionalLight(0x8BCCFF,0.25);fL.position.set(-1,-1,-1);scene.add(fL);
+const grid=new THREE.GridHelper(1000,80,0x0F2030,0x0F2030);
+grid.material.opacity=0.7;grid.material.transparent=true;scene.add(grid);
+function resize(){const w=cWrap.clientWidth,h=cWrap.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}
+window.addEventListener('resize',resize);resize();
+(function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera)})();
+let sceneParts=[],cutObjs=[],savedBounds=null,activeIdx=-1;
+function clearScene(){[...sceneParts,...cutObjs].forEach(m=>scene.remove(m));sceneParts=[];cutObjs=[]}
+function renderParts(parts,cutPlanes,b){
+  clearScene();savedBounds=b;
+  parts.forEach((pos,i)=>{
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.BufferAttribute(pos.slice(),3));
+    geo.computeVertexNormals();
+    const mat=new THREE.MeshPhongMaterial({color:COLORS[i%COLORS.length],emissive:0,specular:0x111111,shininess:30,side:THREE.DoubleSide});
+    const mesh=new THREE.Mesh(geo,mat);
+    mesh.rotation.x=-Math.PI/2;mesh.castShadow=mesh.receiveShadow=true;
+    mesh.userData.idx=i;scene.add(mesh);sceneParts.push(mesh);
+  });
+  const sw=Math.max(b.xMax-b.xMin,b.yMax-b.yMin)*1.2;
+  cutPlanes.forEach(z=>{
+    const pg=new THREE.PlaneGeometry(sw,sw);
+    const pm=new THREE.MeshBasicMaterial({color:0x0066FF,transparent:true,opacity:0.06,depthWrite:false,side:THREE.DoubleSide});
+    const pl=new THREE.Mesh(pg,pm);pl.position.y=z;scene.add(pl);cutObjs.push(pl);
+    const lg=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-sw/2,z,0),new THREE.Vector3(sw/2,z,0)]);
+    const lm=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0x0066FF,opacity:0.35,transparent:true}));
+    scene.add(lm);cutObjs.push(lm);
+  });
+  fitCamera(b);
+  grid.position.y=b.zMin;
+  document.getElementById('hint-bar').classList.add('show');
+  document.getElementById('reset-btn').style.display='block';
+  document.getElementById('empty-state').style.display='none';
+}
+function fitCamera(b){
+  const cx=(b.xMin+b.xMax)/2,cy=(b.yMin+b.yMax)/2,cz=(b.zMin+b.zMax)/2;
+  const diag=Math.sqrt((b.xMax-b.xMin)**2+(b.yMax-b.yMin)**2+(b.zMax-b.zMin)**2);
+  controls.target.set(cx,cz/2,cy);
+  camera.position.set(cx+diag,cz/2+diag*0.5,cy+diag*0.9);
+  camera.near=diag*0.001;camera.far=diag*200;
+  camera.updateProjectionMatrix();controls.update();
+}
+function highlightPart(idx){
+  activeIdx=(idx===activeIdx)?-1:idx;
+  sceneParts.forEach((m,i)=>{
+    const sel=activeIdx===-1||i===activeIdx;
+    m.material.emissive.setHex(i===activeIdx?0x222200:0x000000);
+    m.material.transparent=!sel;m.material.opacity=sel?1:0.22;
+  });
+  document.querySelectorAll('.part-card').forEach((c,i)=>c.classList.toggle('active',i===activeIdx));
+}
+function setVis(idx,v){if(sceneParts[idx])sceneParts[idx].visible=v}
+
+/* ================================================================
+   UI
+   ================================================================ */
+let currentFile=null,currentParts=null,currentNames=null;
+const fmt=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(1)+' MB';
+const $=id=>document.getElementById(id);
+const dropZ=$('drop-zone'),fileInp=$('file-input'),fileInfo=$('file-info');
+const procBtn=$('process-btn'),progWrap=$('prog-wrap'),progFill=$('prog-fill'),progLbl=$('prog-lbl');
+const resultsEl=$('results'),vloader=$('vloader'),vloaderL=$('vloader-lbl'),perfTag=$('perf-tag');
+
+function setFile(f){
+  if(!f||!f.name.toLowerCase().endsWith('.stl')){alert('Please select a .stl file.');return}
+  currentFile=f;dropZ.style.display='none';fileInfo.style.display='flex';
+  $('fi-name').textContent=f.name;$('fi-size').textContent=fmt(f.size);procBtn.disabled=false;
+}
+function clearFile(){currentFile=null;fileInp.value='';dropZ.style.display='block';fileInfo.style.display='none';procBtn.disabled=true}
+fileInp.addEventListener('change',e=>setFile(e.target.files[0]));
+$('fi-clear').addEventListener('click',clearFile);
+dropZ.addEventListener('dragover',e=>{e.preventDefault();dropZ.classList.add('drag')});
+dropZ.addEventListener('dragleave',()=>dropZ.classList.remove('drag'));
+dropZ.addEventListener('drop',e=>{e.preventDefault();dropZ.classList.remove('drag');setFile(e.dataTransfer.files[0])});
+
+[['s-thr','v-thr',v=>v+'°'],['s-area','v-area',v=>parseFloat(v).toFixed(1)+'mm²'],['s-gap','v-gap',v=>parseFloat(v).toFixed(1)+'mm']].forEach(([sid,vid,f])=>{
+  const s=$(sid),d=$(vid);s.addEventListener('input',()=>{d.textContent=f(s.value)});d.textContent=f(s.value);
+});
+
+function setProgress(pct,msg){progFill.style.width=pct+'%';progLbl.textContent=msg;vloaderL.textContent=msg}
+
+procBtn.addEventListener('click',async()=>{
+  if(!currentFile)return;
+  procBtn.disabled=true;progWrap.style.display='block';resultsEl.style.display='none';vloader.style.display='flex';
+  try{
+    setProgress(5,'READING FILE…');await tick();
+    const buffer=await currentFile.arrayBuffer();
+    setProgress(8,'PARSING STL…');await tick();
+    const geo=new THREE.STLLoader().parse(buffer);
+    const ni=geo.index?geo.toNonIndexed():geo;
+    const pos=ni.attributes.position.array;
+    const result=await processModel(pos,
+      parseFloat($('s-thr').value),parseFloat($('s-area').value),parseFloat($('s-gap').value),setProgress);
+    const{parts,cutPlanes,totalFaces,ohFaces,ohAreaPct,warnings,elapsed,bounds}=result;
+
+    $('s-faces').textContent=totalFaces.toLocaleString();
+    $('s-oh').textContent=ohFaces.toLocaleString();
+    $('s-pct').textContent=ohAreaPct.toFixed(1)+'%';
+    $('s-cuts').textContent=cutPlanes.length;
+    $('cut-tags').innerHTML=cutPlanes.map(z=>`<div class="cut-tag">Z=${z.toFixed(2)}</div>`).join('');
+    $('warn-list').innerHTML=warnings.map(w=>`<div class="warn-item"><span>&#9888;</span><span>${w}</span></div>`).join('');
+
+    const names=parts.map((_,i)=>`part_${String(i+1).padStart(2,'0')}.stl`);
+    const pl=$('part-list');pl.innerHTML='';
+    parts.forEach((p,i)=>{
+      let zlo=1e9,zhi=-1e9;for(let j=2;j<p.length;j+=3){if(p[j]<zlo)zlo=p[j];if(p[j]>zhi)zhi=p[j]}
+      const hex='#'+COLORS[i%COLORS.length].toString(16).padStart(6,'0');
+      const card=document.createElement('div');card.className='part-card';
+      card.innerHTML=`<div class="part-dot" style="background:${hex}"></div><div class="part-inf"><div class="part-nm">${names[i]}</div><div class="part-mt">Z ${zlo.toFixed(1)}&rarr;${zhi.toFixed(1)}mm &middot; ${(p.length/9).toLocaleString()} tris</div></div><div class="part-eye" title="Toggle">&#128065;</div>`;
+      let vis=true;
+      card.querySelector('.part-eye').addEventListener('click',e=>{
+        e.stopPropagation();vis=!vis;setVis(i,vis);
+        card.classList.toggle('hidden-part',!vis);
+        card.querySelector('.part-eye').style.opacity=vis?'':'.2';
+      });
+      card.addEventListener('click',()=>highlightPart(i));
+      pl.appendChild(card);
+    });
+    currentParts=parts;currentNames=names;
+    renderParts(parts,cutPlanes,bounds);
+    resultsEl.style.display='block';
+    perfTag.textContent=`${totalFaces.toLocaleString()} FACES · ${elapsed}s`;perfTag.style.display='block';
+  }catch(err){alert('Error: '+err.message);console.error(err)}
+  finally{progWrap.style.display='none';procBtn.disabled=false;vloader.style.display='none'}
+});
+
+$('reset-btn').addEventListener('click',()=>{if(savedBounds)fitCamera(savedBounds)});
+
+$('dl-btn').addEventListener('click',async()=>{
+  if(!currentParts)return;
+  const btn=$('dl-btn');btn.disabled=true;btn.textContent='PACKAGING…';
+  try{
+    if(currentParts.length===1){
+      dlBlob(new Blob([toSTLBuffer(currentParts[0])],{type:'model/stl'}),currentNames[0]);
+    }else{
+      const zip=new JSZip();
+      currentParts.forEach((p,i)=>zip.file(currentNames[i],toSTLBuffer(p)));
+      dlBlob(await zip.generateAsync({type:'blob',compression:'DEFLATE'}),'cut_parts.zip');
+    }
+  }finally{btn.disabled=false;btn.textContent='&#11015; DOWNLOAD PARTS'}
+});
+
+function dlBlob(blob,name){
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+}
+</script>
+</body>
+</html>
