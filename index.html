@@ -127,7 +127,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;heigh
       <input type="range" id="s-area" min="0.5" max="20" value="2" step="0.5">
     </div>
     <div class="field">
-      <div class="field-row"><span class="field-lbl">Cluster gap</span><span class="field-val" id="v-gap">1.0mm</span></div>
+      <div class="field-row"><span class="field-lbl">Cut tolerance</span><span class="field-val" id="v-gap">1.0mm</span></div>
       <input type="range" id="s-gap" min="0.2" max="5" value="1" step="0.1">
     </div>
   </div>
@@ -210,14 +210,20 @@ function detectOverhangs(pos,threshDeg,minAreaMM2){
 }
 
 function selectCutPlanes(zVals,gap,zMin,zMax){
+  // Greedy interval-cover: minimises the number of cuts while guaranteeing every
+  // overhang is within `gap` mm of the cut plane placed below it.
+  // For each uncovered overhang at height h, a cut is placed at h (the rightmost
+  // valid position), automatically covering all overhangs in [h, h+gap].
   if(!zVals.length)return[];
-  const clusters=[[zVals[0]]];
-  for(let i=1;i<zVals.length;i++){
-    const last=clusters[clusters.length-1];
-    if(zVals[i]-last[last.length-1]<=gap)last.push(zVals[i]);
-    else clusters.push([zVals[i]]);
+  const planes=[];
+  let i=0;
+  while(i<zVals.length){
+    const cutZ=zVals[i];
+    planes.push(cutZ+0.01);
+    const limit=cutZ+gap;
+    while(i<zVals.length&&zVals[i]<=limit)i++;
   }
-  return clusters.map(c=>Math.min(...c)+0.01).filter(z=>z>zMin+0.1&&z<zMax-0.1);
+  return planes.filter(z=>z>zMin+0.1&&z<zMax-0.1);
 }
 
 function buildCap(cutEdges,z,normalUp){
